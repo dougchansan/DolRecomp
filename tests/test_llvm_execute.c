@@ -19,6 +19,9 @@ void func_80002B00(CPUState* cpu);
 void func_80002C00(CPUState* cpu);
 void func_80002D00(CPUState* cpu);
 void func_80003000(CPUState* cpu);
+void func_80003100(CPUState* cpu);
+void func_80003200(CPUState* cpu);
+void func_80003300(CPUState* cpu);
 
 static u32 fallback_count;
 static int fallback_bad;
@@ -311,6 +314,62 @@ int main(void) {
         cpu.gpr[4] = 0x5A5A5A5Au;
         func_80003000(&cpu);
         CHECK(mem_read32(&cpu, last_word) == 0xA5A5A5A5u);
+    }
+
+    // Reservations. A guest store has to break a reservation covering the same
+    // 32-byte line and leave every other reservation alone. The emitter skips
+    // that work when no reservation is held, which is the common case and the
+    // reason the check exists -- but it makes the flag decide which path a
+    // store takes, so both paths need exercising.
+    //
+    // CR0 EQ (bit 1 of the top nibble, mask 0x20000000) is how stwcx. reports
+    // whether it stored.
+    {
+        const u32 line = GC_RAM_BASE + 0x4000u;
+
+        // Same line: the ordinary store breaks it, stwcx. must fail, and the
+        // ordinary store's value must be what survives in memory.
+        prepare_call(&cpu, 0x80003100u);
+        cpu.gpr[3] = line;
+        cpu.gpr[5] = 0x11111111u;
+        cpu.gpr[6] = 0x22222222u;
+        func_80003100(&cpu);
+        CHECK((cpu.cr & 0x20000000u) == 0);
+        CHECK(mem_read32(&cpu, line) == 0x11111111u);
+        CHECK(!cpu.reserve_valid);
+
+        // Nothing in between: stwcx. must succeed and consume the reservation.
+        prepare_call(&cpu, 0x80003200u);
+        cpu.gpr[3] = line;
+        cpu.gpr[6] = 0x33333333u;
+        func_80003200(&cpu);
+        CHECK((cpu.cr & 0x20000000u) != 0);
+        CHECK(mem_read32(&cpu, line) == 0x33333333u);
+        CHECK(!cpu.reserve_valid);
+
+        // A store two lines away, executed while the reservation is held. The
+        // reservation must survive, so stwcx. still succeeds -- and both
+        // addresses must hold the value written to them.
+        prepare_call(&cpu, 0x80003300u);
+        cpu.gpr[3] = line;
+        cpu.gpr[5] = 0x44444444u;
+        cpu.gpr[6] = 0x55555555u;
+        func_80003300(&cpu);
+        CHECK((cpu.cr & 0x20000000u) != 0);
+        CHECK(mem_read32(&cpu, line + 0x40u) == 0x44444444u);
+        CHECK(mem_read32(&cpu, line) == 0x55555555u);
+        CHECK(!cpu.reserve_valid);
+
+        // A store with no reservation held takes the skipped path, and must
+        // leave the flag alone rather than writing a stale value back.
+        cpu.reserve_valid = false;
+        cpu.reserve_addr = 0;
+        prepare_call(&cpu, 0x80003000u);
+        cpu.gpr[3] = line;
+        cpu.gpr[4] = 0x66666666u;
+        func_80003000(&cpu);
+        CHECK(mem_read32(&cpu, line) == 0x66666666u);
+        CHECK(!cpu.reserve_valid);
     }
 
     cpu_free(&cpu);

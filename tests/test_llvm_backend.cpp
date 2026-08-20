@@ -116,6 +116,36 @@ int main(int argc, char** argv) {
     };
     CHECK(add_chunk(&module, boundary_words, 3, 0x80003000u));
 
+    // Reservations. Guest stores only break a reservation while one is held,
+    // so the emitter puts that work behind a check on the flag -- which means
+    // the flag now decides which path a store takes, and nothing else in the
+    // suite ever sets it. The differential harness never emits lwarx.
+    //
+    // r3 is the reserved address, r5 the value an ordinary store writes, and r6
+    // the value stwcx. tries to write. CR0 EQ says whether stwcx. succeeded.
+
+    // Same line: the ordinary store must break the reservation, so stwcx.
+    // fails and leaves r5's value in memory.
+    const u32 reserve_broken_words[] = {
+        0x7C801828u, 0x90A30000u, 0x7CC0192Du, 0x4E800020u,
+    };
+    CHECK(add_chunk(&module, reserve_broken_words, 4, 0x80003100u));
+
+    // Nothing in between: the reservation survives and stwcx. succeeds.
+    const u32 reserve_kept_words[] = {
+        0x7C801828u, 0x7CC0192Du, 0x4E800020u,
+    };
+    CHECK(add_chunk(&module, reserve_kept_words, 3, 0x80003200u));
+
+    // A different line, two lines up. The store runs with the flag set, so it
+    // takes the guarded path and has to leave the reservation alone. This is
+    // the case a guard that simply skipped the work when convenient would get
+    // wrong, and it fails silently: stwcx. would just start failing.
+    const u32 reserve_other_line_words[] = {
+        0x7C801828u, 0x90A30040u, 0x7CC0192Du, 0x4E800020u,
+    };
+    CHECK(add_chunk(&module, reserve_other_line_words, 4, 0x80003300u));
+
     // Runtime boundaries must not reset the dispatcher budget.
     const u32 budget_words[] = {
         0x38630001u, 0x00000000u, 0x2C032710u, 0x4180FFF4u, 0x4E800020u,

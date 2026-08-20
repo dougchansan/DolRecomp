@@ -160,17 +160,49 @@ Value *FunctionEmitter::emitGuestLoad(Value *address, Type *resultType,
   return phi;
 }
 
+// A store has to break a reservation only while one is held. The unguarded form
+// computed the new flag on every guest store in the program -- two CPUState
+// loads, an xor, a compare, a select, and a CPUState store -- to arrive at
+//
+//   valid' = valid AND line_differs
+//
+// which is just `valid` whenever valid is already false. Skipping the whole
+// computation in that case is therefore equivalent, not an approximation, and
+// needs no analysis to justify.
+//
+// It is worth doing because false is the overwhelmingly common case: a
+// reservation exists only between an lwarx and the stwcx. that consumes it, and
+// lwarx is the only thing in the tree that sets the flag (dolir_builder.c).
+// Pokemon Colosseum's DOL contains no lwarx at all, so the guarded path there
+// is unreachable; Luigi's Mansion has two sites. The unguarded form was 216,002
+// reservation-slot instructions in the Colosseum module and 294,856 in Luigi's
+// Mansion, all of it maintaining a flag that is never set.
+//
+// The cost that replaces it is a byte load and a branch that is never taken.
+// The load stays because a savestate may restore a reservation taken before the
+// module was entered; only the arithmetic and the CPUState store move behind
+// the branch.
 void FunctionEmitter::clearReservation(Value *address) {
   Value *valid = builder_.CreateLoad(Type::getInt1Ty(context_),
                                      state_[DOLIR_STATE_RESERVE_VALID]);
+  BasicBlock *held =
+      BasicBlock::Create(context_, "reservation_held", function_);
+  BasicBlock *done =
+      BasicBlock::Create(context_, "reservation_done", function_);
+  builder_.CreateCondBr(valid, held, done);
+
+  builder_.SetInsertPoint(held);
   Value *reserved = builder_.CreateLoad(Type::getInt32Ty(context_),
                                         state_[DOLIR_STATE_RESERVE_ADDR]);
   Value *differentLine = builder_.CreateICmpNE(
       builder_.CreateAnd(builder_.CreateXor(reserved, address),
                          builder_.getInt32(~31u)),
       builder_.getInt32(0));
-  builder_.CreateStore(builder_.CreateAnd(valid, differentLine),
-                       state_[DOLIR_STATE_RESERVE_VALID]);
+  // valid is true on this edge, so `valid AND line_differs` is line_differs.
+  builder_.CreateStore(differentLine, state_[DOLIR_STATE_RESERVE_VALID]);
+  builder_.CreateBr(done);
+
+  builder_.SetInsertPoint(done);
 }
 
 void FunctionEmitter::journal(Value *offset, u32 width) {
