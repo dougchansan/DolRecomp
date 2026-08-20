@@ -207,7 +207,28 @@ recover all of it is wrong before it is tested.
 
 **One function is 21.67% of everything.** That concentration is unusual and
 makes `func_800FE9B0` the single most valuable object of study in the whole
-module — worth more attention than any broad change.
+module. Its instruction mix says what it is spending time on:
+
+| | count | share |
+| --- | ---: | ---: |
+| total instructions | 3,935 | |
+| loads | 836 | 21.2% |
+| stores | 458 | 11.6% |
+| branches | 568 | 14.4% |
+| `rev` (byte swaps) | 114 | 2.9% |
+| floating point | 0 | 0% |
+
+There are 1,294 memory instructions but only 114 byte swaps, and a guest memory
+access always carries one. So on the order of 200 of those 1,294 touch guest
+memory and **roughly a thousand — about a quarter of the whole function — are
+`CPUState` traffic**. The function is integer-only: not one floating-point
+instruction in 3,935.
+
+That is the register-cache argument made specific. In the hottest code in the
+program the dominant cost is loading and storing guest registers to memory, in
+exactly the integer/compare-heavy shape that GPR and CR/XER caching targets, and
+`b.hi` appears 92 times against 114 `rev` — the MEM1 bound checks, roughly one
+per access, already about as cheap as the current scheme allows.
 
 **The gather-pipe fix costs 0.52%, not 2.3%.** The 2.3% figure came from a
 Luigi's Mansion comparison. On the title that actually needs the fix it is a
@@ -289,7 +310,63 @@ one `CPUState` load and one `CPUState` store — the traffic the profile says
 dominates. The module does not shrink; it grows by 262,144 bytes, because the
 work moves behind a never-taken branch rather than disappearing.
 
-<!-- AB-RESULT -->
+### And it makes no measurable difference
+
+Colosseum, single core, five alternating pairs, twenty samples per run. All ten
+runs valid — no discards, throttle word unchanged in every one, `CPUThread`
+verified `False` in every one, both modules built in the same session from the
+same hash-verified DOL.
+
+| pair | baseline | guarded | delta |
+| ---: | ---: | ---: | ---: |
+| 1 | 15.93 | 15.84 | −0.57% |
+| 2 | 15.96 | 16.07 | +0.69% |
+| 3 | 15.88 | 15.73 | −0.94% |
+| 4 | 15.94 | 15.72 | −1.38% |
+| 5 | 15.56 | 15.73 | +1.09% |
+| | **15.857** | **15.820** | **−0.23%** |
+
+Three of five pairs favour the baseline. The mean pair delta is −0.22% with a
+standard error of 0.43%, so this design resolves roughly ±1% and the effect —
+in either direction — is inside the noise.
+
+The change removes four executed instructions from every guest store in the
+program, including one `CPUState` load and one `CPUState` store, on a title
+where the work it removes is provably dead. It buys nothing measurable.
+
+**This is the most useful result in this document, because it is a controlled
+test of the thesis the whole plan rests on.** The report attributes ~67% of
+hot-loop time to `CPUState` traffic. If that traffic were the binding
+constraint, deleting a load and a store from the single most frequent operation
+in the program should have moved something. It did not.
+
+The profile says why. IPC is 1.10 on a 3-wide out-of-order core with branch
+misses at 0.33% of instructions: the core is stalled on dependencies and memory
+latency, not starved of issue slots. The removed accesses were to two adjacent
+bytes of a `CPUState` that is hot in L1 on every access, so they consumed issue
+slots the core had spare and never stalled it. Statically the module even grew
+0.50% — over the same 60 regions, 1,060,570 instructions became 1,065,851, and
+the reservation instructions are still present, having moved behind a branch
+rather than disappeared.
+
+The correction this forces is specific: **reducing `CPUState` instruction count
+is not the same as reducing `CPUState` cost.** A register cache is not valuable
+because it removes loads and stores; it is valuable only if it breaks the
+load-use dependency chains those loads and stores create, by keeping a value in
+a host register across the guest instructions that use it. An incremental change
+that removes a fraction of the traffic while leaving every chain intact should
+be expected to measure zero — as this one did.
+
+That is a direct argument for the staged plan in
+[register-cache-design.md](register-cache-design.md) over any further
+peephole work on state traffic, and an argument against expecting partial
+credit from the early stages.
+
+The change is kept: it is provably equivalent, it removes work that can never do
+anything on this title, and it makes the state model marginally smaller for the
+cache work. It is **not** presented as an improvement, and a reviewer who
+preferred to revert it on the grounds that it costs 0.5% of module size for no
+measured return would have the evidence on their side.
 
 ## 5. Cycle accounting
 
@@ -309,21 +386,40 @@ before it repeats the guard-counter mistake with extra steps.
 
 ## 6. Ranking
 
+The null result above reorders this list, because it retires a whole class of
+candidate. Anything whose mechanism is "emit fewer `CPUState` accesses" now has
+a measured precedent saying it will not register.
+
 | candidate | expected | evidence | risk | complexity | general |
 | --- | --- | --- | --- | --- | --- |
-| reservation guard | small, broad | measured, see §4 | very low — provably equivalent | done | yes |
-| register cache, staged | largest | 66% in module, IPC 1.10 | high without the schema | very high | yes |
-| CR/XER subfield caching | large | comparison-heavy code | high | high | yes |
-| inline psq/FMA helpers | ~1.8% ceiling | profile | low | medium | yes |
+| register cache, staged, breaking dependency chains | largest | 66% in module; hottest function ~27% state traffic, IPC 1.10 | high without the schema | very high | yes |
+| CR/XER subfield caching | large | hottest function is integer/compare-heavy, zero FP | high | high | yes |
+| study `func_800FE9B0` | unknown, concentrated | 21.67% of all samples | none — analysis | low | title-specific |
+| inline psq/FMA helpers | ≤1.8% | profile; also removes state barriers | low | medium | yes |
 | block-segment cycles | medium | visible in emitted code | medium | high | yes |
-| drop MEM2 path | small | dead for GC titles | low, needs re-check per entry | low | GC only |
+| representative PGO | unknown | not re-measured this round | none | low | per title |
+| ~~reservation guard~~ | ~~small, broad~~ | **measured: −0.23%, inside noise** | very low | done | yes |
+| ~~drop MEM2 path~~ | ~~small~~ | same mechanism as the null result | low | low | GC only |
 | gather-pipe specialisation | ≤0.52% | profile | medium | medium | no |
-| fault-assisted fastmem | ≤4 insn/access | §4 | high | high | yes |
-| representative PGO | unknown | not re-measured | none | low | per title |
+| fault-assisted fastmem | ≤4 insn/access | §4; same mechanism as the null result | high | high | yes |
 
-The gather-pipe work drops down the list on measurement: 0.52%, not 2.3%.
-Fault-assisted fastmem is not worth its risk while two thirds of the time is
-inside the module doing state traffic rather than bounds checks.
+Three demotions, all on measurement rather than taste:
+
+- **The reservation guard** measured zero. It is struck through because it was
+  tested, not because it was rejected on reasoning.
+- **Dropping the MEM2 path** and **fault-assisted fastmem** both work by
+  emitting fewer instructions per memory operation. That is precisely the
+  mechanism that just measured zero, and fault-assisted fastmem would buy at
+  most four instructions per access — fewer than the reservation guard removed
+  per store — in exchange for signal handling that interacts with the runtime's
+  own fault handling. Neither is worth doing next.
+- **Gather-pipe specialisation** costs 0.52% on the title that needs it, not the
+  2.3% measured on a title that does not.
+
+What survives is the work that changes the *shape* of the generated code rather
+than its instruction count: keeping values in host registers across guest
+instructions, and removing out-of-line helper calls that are also state
+barriers.
 
 ## 7. Not done, and why
 
@@ -345,11 +441,20 @@ inside the module doing state traffic rather than bounds checks.
 
 ## 8. Next
 
-1. Study `func_800FE9B0`. One function at 21.67% is worth more than any broad
-   change on this list.
-2. Stages 1–3 of the register cache — the description, per-helper effect
+1. Study `func_800FE9B0`. One function at 21.67% of all samples, integer-only,
+   about a quarter of it state traffic, is worth more than any broad change on
+   the list — and it is analysis, so it costs nothing but time.
+2. Stages 1–3 of the register cache: the description, per-helper effect
    declarations, then narrowing them. Stages 1 and 2 are byte-identical by
    construction and produce no speedup; they are the ones skipped four times.
-3. Inline the paired-single and FMA helpers, which is bounded but cheap and
-   removes state barriers as well as calls.
+3. Inline the paired-single and FMA helpers. Bounded at ~1.8%, but each call is
+   also a state barrier, so it is one of the few cheap changes that alters code
+   shape rather than instruction count.
 4. Re-collect profiles and measure held-out PGO on AArch64 properly.
+
+And one methodological item, given §4: **any candidate whose mechanism is
+"fewer `CPUState` accesses" should be expected to measure zero** until something
+demonstrates otherwise. The next state-related change to be benchmarked should
+be one that keeps a value in a host register across guest instructions — if that
+also measures zero, the 67% attribution itself is wrong and the plan needs
+rebuilding from the profile rather than from the report.

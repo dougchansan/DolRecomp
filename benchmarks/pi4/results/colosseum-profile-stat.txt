@@ -1,0 +1,10 @@
+
+ Performance counter stats for process id '27847':
+
+    64,859,682,964      instructions:u                   #    1.10  insn per cycle            
+    58,929,096,793      cycles:u                                                              
+       215,889,249      branch-misses:u                                                       
+        78,492,628      cache-misses:u                                                        
+
+      30.004278806 seconds time elapsed
+
