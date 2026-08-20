@@ -6,6 +6,9 @@
 *.cmake text eol=lf
 *.md text eol=lf
 *.txt text eol=lf
+# Shell scripts run on the Pi. CRLF makes them fail at the shebang.
+*.sh text eol=lf
+*.py text eol=lf
 
 *.dol binary
 *.elf binary
