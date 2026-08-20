@@ -124,6 +124,25 @@ static u32 c_chunk_instructions(void) {
 // without emitting DOLIR_OP_STATE_WRITE. Both barrier sides are conservative
 // again.
 #define DOLLLVM_CACHE_VERSION "dolllvm-v20-mem1-hoist"
+/* The version string above is documentation, not a cache key. Every entry in
+   the list above it exists because a human remembered to bump it, and the
+   entries that are missing are the measurements that had to be retracted. The
+   build system hashes the sources that decide what gets emitted -- the LLVM
+   emitter, the memory and runtime lowering, DolIR, and the CPUState layout --
+   and passes the digest in here, so editing any of them invalidates the cache
+   whether or not anyone touches the string.
+
+   If the digest is absent the build was not configured by CMake, and there is
+   no way to tell a stale object from a fresh one. In that case the cache is
+   still written but never read: a slow build is recoverable, a wrong benchmark
+   is not. */
+#ifndef DOLRECOMP_CODEGEN_SOURCE_HASH
+#define DOLRECOMP_CODEGEN_SOURCE_HASH ""
+#endif
+
+static int codegen_source_hash_known(void) {
+    return DOLRECOMP_CODEGEN_SOURCE_HASH[0] != 0;
+}
 // The LLVM optimisation level used for generated objects. Named so it can be
 // folded into the cache key; changing it must not reuse cached objects.
 #define DOLLLVM_OPT_LEVEL 2
@@ -325,6 +344,9 @@ static u64 hash_bytes(u64 hash, const void* data, size_t size) {
 static u64 llvm_job_hash(const LLVMChunkJob* job) {
     u64 hash = 1469598103934665603ull;
     hash = hash_bytes(hash, DOLLLVM_CACHE_VERSION, strlen(DOLLLVM_CACHE_VERSION));
+    /* The emitter, lowering, DolIR and CPUState layout, hashed by the build. */
+    hash = hash_bytes(hash, DOLRECOMP_CODEGEN_SOURCE_HASH,
+                      strlen(DOLRECOMP_CODEGEN_SOURCE_HASH));
     hash = hash_bytes(hash, &job->function_address, sizeof(job->function_address));
     hash = hash_bytes(hash, &job->count, sizeof(job->count));
     u32 state_size = (u32)sizeof(CPUState);
@@ -408,25 +430,57 @@ static int cache_bitcode_path(const LLVMChunkJob* job, char* out, size_t size) {
     return snprintf(out, size, "%s.bc", job->cache_path) < (int)size;
 }
 
+/* Explains, per job, why a cached object was accepted or rejected. The cache
+   being silent about its own decisions is what let stale objects be measured
+   and published; DOLRECOMP_LLVM_CACHE_EXPLAIN=1 makes the decision auditable
+   without having to compare module sizes after the fact. */
+static void explain_cache(const LLVMChunkJob* job, const char* decision) {
+    if (!getenv("DOLRECOMP_LLVM_CACHE_EXPLAIN"))
+        return;
+    fprintf(stderr,
+            "[cache] %s job=%u addr=0x%08x key=%016llx\n"
+            "        version=%s codegen-source=%s opt=%d\n"
+            "        path=%s\n",
+            decision, job->index, (unsigned)job->function_address,
+            (unsigned long long)job->hash, DOLLLVM_CACHE_VERSION,
+            codegen_source_hash_known() ? DOLRECOMP_CODEGEN_SOURCE_HASH
+                                        : "UNKNOWN (reads disabled)",
+            (int)DOLLLVM_OPT_LEVEL,
+            job->cache_path[0] ? job->cache_path : "(none)");
+}
+
 static int reuse_llvm_object(const LLVMChunkJob* job) {
     char cached_bitcode[1440];
+    /* Without a codegen digest there is nothing that distinguishes an object
+       built by this emitter from one built by the previous one. */
+    if (!codegen_source_hash_known()) {
+        explain_cache(job, "reject: codegen source hash unavailable");
+        return 0;
+    }
     int wants_bitcode = job->bitcode_path[0] != 0;
     if (wants_bitcode && !cache_bitcode_path(job, cached_bitcode,
                                              sizeof(cached_bitcode)))
         return 0;
     if (getenv("DOLRECOMP_LLVM_RESUME") && valid_object_file(job->path) &&
         valid_llvm_job_stamp(job) &&
-        (!wants_bitcode || file_exists(job->bitcode_path)))
+        (!wants_bitcode || file_exists(job->bitcode_path))) {
+        explain_cache(job, "accept: resumed in-place object");
         return 1;
-    if (!job->cache_path[0] || !valid_object_file(job->cache_path))
+    }
+    if (!job->cache_path[0] || !valid_object_file(job->cache_path)) {
+        explain_cache(job, "miss: no object for this key");
         return 0;
-    if (wants_bitcode && !file_exists(cached_bitcode))
+    }
+    if (wants_bitcode && !file_exists(cached_bitcode)) {
+        explain_cache(job, "miss: key has an object but no bitcode");
         return 0;
+    }
     if (!copy_file(job->cache_path, job->path))
         return 0;
     if (wants_bitcode && !copy_file(cached_bitcode, job->bitcode_path))
         return 0;
     write_llvm_job_stamp(job);
+    explain_cache(job, "accept: key matched");
     return 1;
 }
 

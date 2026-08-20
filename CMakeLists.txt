@@ -155,6 +155,53 @@ if(NOT WIN32)
     target_link_libraries(dr_backend PUBLIC Threads::Threads)
 endif()
 
+# The generated-object cache must invalidate when the code that generates those
+# objects changes. A hand-edited version string cannot do that. Five separate
+# measurements in this project were taken against objects built by a previous
+# emitter because the string was not bumped, and one was only caught because the
+# module came out byte-identical in size. Hash the sources that decide what gets
+# emitted, and let CMake re-run when any of them is touched.
+set(DOLRECOMP_CODEGEN_SOURCES
+    src/backend/llvm/llvm_backend.cpp
+    src/backend/llvm/llvm_backend.h
+    src/backend/llvm/llvm_control_flow.cpp
+    src/backend/llvm/llvm_function_emitter.cpp
+    src/backend/llvm/llvm_function_emitter.h
+    src/backend/llvm/llvm_memory_lowering.cpp
+    src/backend/llvm/llvm_runtime_lowering.cpp
+    src/ir/dolir.h
+    src/ir/dolir.c
+    src/ir/dolir_builder.h
+    src/ir/dolir_builder.c
+    src/cpu/cpu.h
+)
+set(DOLRECOMP_CODEGEN_DIGEST "")
+foreach(codegen_source IN LISTS DOLRECOMP_CODEGEN_SOURCES)
+    file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/${codegen_source}" codegen_digest)
+    string(APPEND DOLRECOMP_CODEGEN_DIGEST "${codegen_source}:${codegen_digest};")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/${codegen_source}")
+endforeach()
+string(SHA256 DOLRECOMP_CODEGEN_SOURCE_HASH "${DOLRECOMP_CODEGEN_DIGEST}")
+message(STATUS "Codegen source hash: ${DOLRECOMP_CODEGEN_SOURCE_HASH}")
+
+# The list above is only as good as its completeness. A new file under
+# src/backend/llvm/ that nobody adds to it would emit different code without
+# changing the digest, which is the same failure the digest exists to prevent --
+# just harder to notice. Fail configuration rather than let that ship.
+file(GLOB DOLRECOMP_CODEGEN_PRESENT
+    RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/backend/llvm/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/backend/llvm/*.h")
+foreach(codegen_source IN LISTS DOLRECOMP_CODEGEN_PRESENT)
+    if(NOT codegen_source IN_LIST DOLRECOMP_CODEGEN_SOURCES)
+        message(FATAL_ERROR
+            "${codegen_source} affects generated code but is not in "
+            "DOLRECOMP_CODEGEN_SOURCES, so editing it would not invalidate the "
+            "object cache. Add it to the list in CMakeLists.txt.")
+    endif()
+endforeach()
+
 add_library(dr_app STATIC
     src/app/cli.c
     src/app/database.c
@@ -163,6 +210,8 @@ add_library(dr_app STATIC
     src/app/pipeline.c
 )
 target_include_directories(dr_app PUBLIC ${DOLRECOMP_SRC})
+target_compile_definitions(dr_app PRIVATE
+    DOLRECOMP_CODEGEN_SOURCE_HASH="${DOLRECOMP_CODEGEN_SOURCE_HASH}")
 target_link_libraries(dr_app PUBLIC dr_backend dr_analysis dr_frontend dr_platform dr_ir dr_common)
 if(DOLRECOMP_ENABLE_LLVM)
     target_link_libraries(dr_app PUBLIC dr_llvm)
