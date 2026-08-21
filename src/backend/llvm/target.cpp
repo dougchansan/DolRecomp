@@ -45,11 +45,20 @@ static const ProfileDefinition *definition(DolLLVMTargetProfile id) {
 
 void initializeTargets() {
   static const bool once = [] {
-    InitializeAllTargetInfos();
-    InitializeAllTargets();
-    InitializeAllTargetMCs();
-    InitializeAllAsmPrinters();
-    InitializeAllAsmParsers();
+    // Only the targets DolRecomp can emit. InitializeAll* expands to every
+    // target the host LLVM was configured with, which forces the link to carry
+    // backends the emitter never uses (and which a given LLVM build may not
+    // ship at all).
+    LLVMInitializeX86TargetInfo();
+    LLVMInitializeX86Target();
+    LLVMInitializeX86TargetMC();
+    LLVMInitializeX86AsmPrinter();
+    LLVMInitializeX86AsmParser();
+    LLVMInitializeAArch64TargetInfo();
+    LLVMInitializeAArch64Target();
+    LLVMInitializeAArch64TargetMC();
+    LLVMInitializeAArch64AsmPrinter();
+    LLVMInitializeAArch64AsmParser();
     return true;
   }();
   (void)once;

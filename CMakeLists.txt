@@ -140,10 +140,6 @@ if(DOLRECOMP_ENABLE_LLVM)
         X86AsmParser
         AArch64CodeGen
         AArch64AsmParser
-        ARMCodeGen
-        ARMAsmParser
-        RISCVCodeGen
-        RISCVAsmParser
     )
 
     if(TARGET LLVM)
