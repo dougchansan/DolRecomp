@@ -81,7 +81,7 @@ bool FunctionEmitter::emit(raw_ostream &diagnostics) {
   BasicBlock *region = nullptr;
   for (u32 i = 0; i < source_.block_count; i++) {
     if (source_.blocks[i].terminator.kind == DOLIR_TERM_FALLBACK) {
-      blocks_[i] = fallback_block_;
+      blocks_[i] = fallbackEdge(source_.blocks[i].guest_address);
       region = nullptr;
       continue;
     }

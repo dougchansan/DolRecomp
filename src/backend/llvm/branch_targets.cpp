@@ -114,9 +114,7 @@ BasicBlock *FunctionEmitter::exitDestination(u32 pc) {
 
 BasicBlock *
 FunctionEmitter::fallbackDestination(const DolIRTerminator &terminator) {
-  BasicBlock *source = builder_.GetInsertBlock();
-  fallback_pc_->addIncoming(builder_.getInt32(terminator.guest_pc), source);
-  return fallback_block_;
+  return fallbackEdge(terminator.guest_pc);
 }
 
 BasicBlock *FunctionEmitter::fallbackEdge(u32 pc) {

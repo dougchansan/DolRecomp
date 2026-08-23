@@ -42,6 +42,10 @@ static u32 psq_dform(bool store, u8 reg, u8 base, u16 displacement) {
          (displacement & 0x0fffu);
 }
 
+static u32 branch(bool link, u32 delta) {
+  return 0x48000000u | (delta & 0x03fffffcu) | (link ? 1u : 0u);
+}
+
 static bool add_chunk(DolIRModule *module, const u32 *words, u32 count,
                       u32 address) {
   PPCInst *instructions = new PPCInst[count];
@@ -338,6 +342,17 @@ int main(int argc, char **argv) {
   CHECK(add_chunk(&module, return_call_words, 2, 0x80003B00u));
   CHECK(add_chunk(&module, return_continuation_words, 3, 0x80003B08u));
   CHECK(add_chunk(&module, return_callee_words, 2, 0x80003C00u));
+
+  // Both indirect returns can dispatch to the linked branch's fallback
+  // continuation. The mtctr/bctr path also carries modified state into it.
+  const u32 indirect_fallback_words[] = {
+      branch(true, 0x10u),
+      0x00000000u,
+      mtspr(3, 9),
+      0x4E800420u,
+      0x4E800020u,
+  };
+  CHECK(add_chunk(&module, indirect_fallback_words, 5, 0x80003D00u));
 
   CHECK(dolir_verify(&module, stderr));
   DolLLVMOptions options{};
