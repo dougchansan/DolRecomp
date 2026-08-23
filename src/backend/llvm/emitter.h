@@ -65,6 +65,10 @@ private:
   void scanLoopHeaders();
   void scanRegionLeaders();
   void finalizeStateSSA();
+  bool stateInMemory() const;
+  bool state_in_memory_ = false;
+  static bool slotIsPacked(DolIRStateSlot slot);
+  bool slotInMemory(DolIRStateSlot slot) const;
 
   void emitEntry();
   bool emitWrapper(llvm::raw_ostream &diagnostics);
@@ -190,7 +194,11 @@ private:
   llvm::Value *mem2_size_ = nullptr;
   llvm::BasicBlock *fallback_block_ = nullptr;
   llvm::PHINode *fallback_pc_ = nullptr;
-  std::array<llvm::AllocaInst *, DOLIR_STATE_COUNT> state_{};
+  // Where each guest state slot lives in this function. By default an alloca
+  // that mem2reg promotes; with --state-in-memory a pointer straight into
+  // CPUState, so every load and store site works unchanged either way. Packed
+  // slots always keep an alloca -- they have no standalone storage to point at.
+  std::array<llvm::Value *, DOLIR_STATE_COUNT> state_{};
   std::array<llvm::AllocaInst *, 32> pair_f32_{};
   std::array<llvm::AllocaInst *, 32> pair_f64_{};
   std::array<FPRepresentation, 32> fp_rep_{};

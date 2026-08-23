@@ -29,6 +29,7 @@ FunctionEmitter::FunctionEmitter(LLVMContext &context, Module &module,
       semantics_(options.semantics),
       symbol_suffix_(options.symbol_suffix ? options.symbol_suffix : ""),
       fixed_memory_layout_(options.fixed_memory_layout != 0),
+      state_in_memory_(options.state_in_memory != 0),
       expected_ram_size_(options.ram_size),
       expected_mem2_size_(options.mem2_size) {}
 

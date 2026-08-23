@@ -10,11 +10,43 @@ namespace dolllvm {
 
 using namespace llvm;
 
+// Guest state can live in CPUState instead of being hoisted into allocas at
+// region entry.
+//
+// Promoting the guest register file gives the register allocator far more
+// simultaneously live values than x86-64 has registers, so it spills them
+// straight back. Measured on GM4E01: 631 state phi nodes across 228 basic
+// blocks in a single chunk, 20+ per block in hot loops. AArch64's 31 GPRs
+// absorb much of that; x86-64's 16 do not.
+//
+// Note that skipping PromoteMemToReg alone achieves nothing: optimizeModule()
+// runs the standard -O2 pipeline before emission and SROA/mem2reg promote the
+// allocas anyway. The allocas have to not exist.
+bool FunctionEmitter::stateInMemory() const { return state_in_memory_; }
+
+// These slots are bitfields inside a wider CPUState word rather than
+// addressable storage: CR0-CR7 are nibbles of cr, XER_CA-XER_SO are bits of
+// xer, and XER itself preserves those flag bits while writing only the low 29.
+// storeContext and loadContext pack and unpack them, so they cannot be pointed
+// at directly and always keep an alloca.
+bool FunctionEmitter::slotIsPacked(DolIRStateSlot slot) {
+  return (slot >= DOLIR_STATE_CR0 && slot <= DOLIR_STATE_CR7) ||
+         (slot >= DOLIR_STATE_XER_CA && slot <= DOLIR_STATE_XER_SO) ||
+         slot == DOLIR_STATE_XER;
+}
+
+bool FunctionEmitter::slotInMemory(DolIRStateSlot slot) const {
+  return stateInMemory() && !slotIsPacked(slot);
+}
+
 void FunctionEmitter::finalizeStateSSA() {
+  // Nothing was hoisted, so there is nothing to promote.
+  if (stateInMemory())
+    return;
   SmallVector<AllocaInst *, DOLIR_STATE_COUNT + 64> registers;
-  for (AllocaInst *slot : state_)
-    if (slot)
-      registers.push_back(slot);
+  for (Value *slot : state_)
+    if (auto *alloca = dyn_cast_or_null<AllocaInst>(slot))
+      registers.push_back(alloca);
   for (AllocaInst *pair : pair_f32_)
     if (pair)
       registers.push_back(pair);

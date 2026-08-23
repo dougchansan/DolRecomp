@@ -73,6 +73,7 @@ typedef struct {
     const char* profile_generate_path;
     const char* profile_use_path;
     u64 partition_seed;
+    int state_in_memory;
     u32 ram_size;
     u32 mem2_size;
     char symbol_suffix[32];
@@ -260,6 +261,11 @@ static u64 llvm_job_hash(const LLVMChunkJob* job) {
     hash = hash_bytes(hash, &job->semantics, sizeof(job->semantics));
     hash = hash_bytes(hash, &job->instrumentation,
                       sizeof(job->instrumentation));
+    /* Changes the emitted code, so a plan built with it must not collide with
+       one built without it. Omitting this is how a toggled codegen option
+       silently returns another configuration's objects. */
+    hash = hash_bytes(hash, &job->state_in_memory,
+                      sizeof(job->state_in_memory));
     hash = hash_bytes(hash, &job->partition_seed,
                       sizeof(job->partition_seed));
     hash = hash_bytes(hash, &job->ram_size, sizeof(job->ram_size));
@@ -465,6 +471,7 @@ static int emit_llvm_chunk_job(const void* data, void* user) {
     options.profile_generate_path = job->profile_generate_path;
     options.profile_use_path = job->profile_use_path;
     options.partition_seed = job->partition_seed;
+    options.state_in_memory = job->state_in_memory;
     options.emit_thinlto = 1;
     options.thinlto_path = job->thinlto_path;
     options.fixed_memory_layout = 1;
@@ -880,6 +887,7 @@ static int emit_code_sections_llvm(const LoadedCodeSection* sections,
                     options->profile_generate_path;
                 target_job->profile_use_path = options->profile_use_path;
                 target_job->partition_seed = options->partition_seed;
+                target_job->state_in_memory = options->state_in_memory;
                 target_job->ram_size = GC_MAIN_RAM_SIZE;
                 target_job->mem2_size = cpu == DOLRECOMP_CPU_GEKKO
                                              ? 0u

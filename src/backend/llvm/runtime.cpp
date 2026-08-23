@@ -32,6 +32,10 @@ void FunctionEmitter::reloadState(DolIRStateSlot slot) {
   known_state_[slot] = nullptr;
   if (slot == DOLIR_STATE_FPSCR)
     pending_fprf_ = nullptr;
+  // The helper wrote CPUState directly and the slot points there, so the value
+  // is already current; only the cached constant needed clearing.
+  if (slotInMemory(slot))
+    return;
   builder_.CreateStore(loadContext(slot), state_[slot]);
 }
 
