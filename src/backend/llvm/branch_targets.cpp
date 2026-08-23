@@ -93,6 +93,8 @@ BasicBlock *FunctionEmitter::externalDestination(const DolIRTerminator &term,
       if (!used_[state])
         continue;
       auto stateSlot = static_cast<DolIRStateSlot>(state);
+      if (slotInMemory(stateSlot))
+        continue;
       builder_.CreateStore(loadContext(stateSlot), state_[state]);
     }
     builder_.CreateBr(blocks_[continuationBlock]);

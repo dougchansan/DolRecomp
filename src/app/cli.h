@@ -30,6 +30,7 @@ typedef struct {
     int setup_mode;
     int show_help;
     int fast_semantics;
+    int state_in_memory;
     int lockstep_instrumentation;
 } CliOptions;
 

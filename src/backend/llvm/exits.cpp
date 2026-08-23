@@ -27,6 +27,12 @@ void FunctionEmitter::emitEntry() {
     if (!used_[slot])
       continue;
     auto stateSlot = static_cast<DolIRStateSlot>(slot);
+    if (slotInMemory(stateSlot)) {
+      // No alloca and no entry copy: the slot is read and written where it
+      // already lives, inside CPUState.
+      state_[slot] = bytePtr(stateOffset(stateSlot));
+      continue;
+    }
     state_[slot] = builder_.CreateAlloca(type(dolir_state_type(stateSlot)),
                                          nullptr, "state");
   }
@@ -97,6 +103,9 @@ void FunctionEmitter::emitEntry() {
     if (!used_[slot])
       continue;
     auto stateSlot = static_cast<DolIRStateSlot>(slot);
+    // A slot that already points into CPUState needs no prologue copy.
+    if (slotInMemory(stateSlot))
+      continue;
     builder_.CreateStore(loadContext(stateSlot), state_[slot]);
   }
   initializeEntryControls();
@@ -132,6 +141,10 @@ void FunctionEmitter::syncDirtyState() {
     if (!dirty_[slot] || slot == DOLIR_STATE_FPSCR)
       continue;
     auto stateSlot = static_cast<DolIRStateSlot>(slot);
+    // Nothing was hoisted for this slot, so nothing has gone stale; the load
+    // would read a CPUState field and store it straight back to itself.
+    if (slotInMemory(stateSlot))
+      continue;
     storeContext(
         stateSlot,
         builder_.CreateLoad(type(dolir_state_type(stateSlot)), state_[slot]));

@@ -48,6 +48,10 @@ typedef struct {
     u32 ram_size;
     u32 mem2_size;
     u64 partition_seed;
+    /* Keep guest state in CPUState instead of hoisting it into allocas that
+       mem2reg promotes. Changes emitted code, so it participates in the object
+       cache key. */
+    int state_in_memory;
     const DolLLVMFunctionRange* function_ranges;
     u32 function_range_count;
     const u32* entry_points;
