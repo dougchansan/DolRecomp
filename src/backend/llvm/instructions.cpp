@@ -101,6 +101,38 @@ bool FunctionEmitter::emitInstruction(const DolIRInstruction &inst,
     result = stateValue(static_cast<DolIRStateSlot>(inst.aux));
     break;
   case DOLIR_OP_STATE_WRITE:
+    if (static_cast<DolIRStateSlot>(inst.aux) == DOLIR_STATE_MSR) {
+      // MSR[EE] going 0->1 is an interrupt delivery point. The interpreter
+      // and the C backend reach one at every block boundary, but generated
+      // code here runs whole critical sections between dispatcher visits,
+      // and the budget guards that end a burst sit at call sites -- which
+      // in OS code are almost all inside interrupt-disabled windows. A
+      // guest that waits by yield-spinning (enable, check, disable,
+      // reschedule) then never presents an enabled window at a dispatch
+      // boundary, and pending external interrupts starve: Colosseum
+      // renders one frame per 3-second timeout that way. Hand control
+      // back to the dispatcher whenever mtmsr enables EE, exactly like
+      // the block-ending JITs do.
+      Value *oldMSR = builder_.CreateLoad(
+          type(dolir_state_type(DOLIR_STATE_MSR)), state_[inst.aux]);
+      builder_.CreateStore(operand(inst, 0), state_[inst.aux]);
+      noteStateWrite(DOLIR_STATE_MSR, operand(inst, 0));
+      materializeFPRF();
+      Value *enabling = builder_.CreateAnd(
+          builder_.CreateAnd(builder_.CreateNot(oldMSR), operand(inst, 0)),
+          builder_.getInt32(0x8000));
+      BasicBlock *eeExit =
+          BasicBlock::Create(context_, "msr_ee_exit", function_);
+      BasicBlock *eeCont =
+          BasicBlock::Create(context_, "msr_ee_cont", function_);
+      builder_.CreateCondBr(
+          builder_.CreateICmpNE(enabling, builder_.getInt32(0)), eeExit,
+          eeCont);
+      builder_.SetInsertPoint(eeExit);
+      sideExit(inst.guest_pc + 4u);
+      builder_.SetInsertPoint(eeCont);
+      break;
+    }
     builder_.CreateStore(operand(inst, 0), state_[inst.aux]);
     noteStateWrite(static_cast<DolIRStateSlot>(inst.aux), operand(inst, 0));
     break;
