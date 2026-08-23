@@ -58,6 +58,15 @@ void FunctionEmitter::noteStateWrite(DolIRStateSlot slot, Value *value) {
   } else if (slot == DOLIR_STATE_HID2) {
     psq_direct_proven_ = false;
     psq_indexed_proven_ = false;
+  } else if (slot == DOLIR_STATE_MSR) {
+    // MSR[FP] decides whether a floating-point instruction traps, and
+    // emitFPAvailable caches that answer for the rest of the region. A
+    // write to MSR can clear FP, so the cached answer has to go. Without
+    // this an mtmsr that disables FP mid-region leaves the FP
+    // instructions after it running unchecked, and the guest never takes
+    // the FP-unavailable exception its lazy FPU context switching is
+    // built on.
+    fp_available_checked_ = false;
   }
 }
 
