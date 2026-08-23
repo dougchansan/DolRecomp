@@ -89,12 +89,15 @@ BasicBlock *FunctionEmitter::externalDestination(const DolIRTerminator &term,
     builder_.CreateRetVoid();
   } else {
     reloadCallCounters();
-    for (u32 state = 0; state < DOLIR_STATE_COUNT; state++) {
-      if (!used_[state])
-        continue;
-      auto stateSlot = static_cast<DolIRStateSlot>(state);
-      builder_.CreateStore(loadContext(stateSlot), state_[state]);
-    }
+    // The callee can invalidate anything the emitter had concluded about
+    // guest state: whether MSR[FP] was already checked, which slots hold
+    // known constants, whether paired-single addressing was proven.
+    // Reloading the values without dropping those conclusions leaves
+    // stateValue() returning a constant the callee has since overwritten.
+    // The fallback resume path already uses reloadUsedState() for exactly
+    // this reason; this path reloaded values by hand and skipped the
+    // invalidation.
+    reloadUsedState();
     builder_.CreateBr(blocks_[continuationBlock]);
   }
   builder_.restoreIP(saved);
