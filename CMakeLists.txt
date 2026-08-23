@@ -135,16 +135,26 @@ if(DOLRECOMP_ENABLE_LLVM)
         MC
         native
         nativecodegen
-        # Specific target backends required by target.cpp
-        X86CodeGen
-        X86AsmParser
-        AArch64CodeGen
-        AArch64AsmParser
-        ARMCodeGen
-        ARMAsmParser
-        RISCVCodeGen
-        RISCVAsmParser
+        # Target backends are appended below, gated on what this LLVM ships.
     )
+
+    # target.cpp registers only the targets it can emit for, and only those
+    # this LLVM was built with. Naming them unconditionally breaks two ways:
+    # against an LLVM without one of them the call does not even compile, and
+    # registering every target via InitializeAll* drags unused backends into
+    # the link. LLVM_TARGETS_TO_BUILD is what LLVMConfig.cmake reports.
+    if("X86" IN_LIST LLVM_TARGETS_TO_BUILD)
+        list(APPEND DOLRECOMP_LLVM_COMPONENTS X86CodeGen X86AsmParser)
+        target_compile_definitions(dr_llvm PRIVATE DOLLLVM_HAVE_X86_TARGET=1)
+    endif()
+    if("AArch64" IN_LIST LLVM_TARGETS_TO_BUILD)
+        list(APPEND DOLRECOMP_LLVM_COMPONENTS AArch64CodeGen AArch64AsmParser)
+        target_compile_definitions(dr_llvm PRIVATE DOLLLVM_HAVE_AARCH64_TARGET=1)
+    endif()
+    if(NOT "X86" IN_LIST LLVM_TARGETS_TO_BUILD AND NOT "AArch64" IN_LIST LLVM_TARGETS_TO_BUILD)
+        message(FATAL_ERROR
+            "DolRecomp's LLVM backend needs the X86 or AArch64 target; this LLVM has: ${LLVM_TARGETS_TO_BUILD}")
+    endif()
 
     if(TARGET LLVM)
         target_link_libraries(dr_llvm PRIVATE LLVM)

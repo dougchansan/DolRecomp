@@ -5,6 +5,10 @@
 #include <string.h>
 #include <time.h>
 
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
 void func_80003100(CPUState *cpu);
 void func_80003500(CPUState *cpu);
 void func_80003750(CPUState *cpu);
@@ -33,9 +37,17 @@ static bool region_query(CPUState *cpu, u32 address) {
 }
 
 static double seconds(void) {
+#if defined(_WIN32)
+  LARGE_INTEGER frequency;
+  LARGE_INTEGER now;
+  QueryPerformanceFrequency(&frequency);
+  QueryPerformanceCounter(&now);
+  return (double)now.QuadPart / (double)frequency.QuadPart;
+#else
   struct timespec now;
   clock_gettime(CLOCK_MONOTONIC, &now);
   return (double)now.tv_sec + (double)now.tv_nsec * 1e-9;
+#endif
 }
 
 static void prepare(CPUState *cpu, u32 pc) {

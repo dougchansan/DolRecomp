@@ -45,11 +45,26 @@ static const ProfileDefinition *definition(DolLLVMTargetProfile id) {
 
 void initializeTargets() {
   static const bool once = [] {
-    InitializeAllTargetInfos();
-    InitializeAllTargets();
-    InitializeAllTargetMCs();
-    InitializeAllAsmPrinters();
-    InitializeAllAsmParsers();
+    // Only the targets DolRecomp can emit, and only those the host LLVM
+    // actually ships. InitializeAll* expands to every target this LLVM was
+    // configured with, which forces the link to carry backends the emitter
+    // never uses; naming X86 and AArch64 unconditionally instead would fail to
+    // compile against an LLVM built without one of them. CMake derives these
+    // two macros from LLVM_TARGETS_TO_BUILD, so this tracks the host build.
+#if defined(DOLLLVM_HAVE_X86_TARGET)
+    LLVMInitializeX86TargetInfo();
+    LLVMInitializeX86Target();
+    LLVMInitializeX86TargetMC();
+    LLVMInitializeX86AsmPrinter();
+    LLVMInitializeX86AsmParser();
+#endif
+#if defined(DOLLLVM_HAVE_AARCH64_TARGET)
+    LLVMInitializeAArch64TargetInfo();
+    LLVMInitializeAArch64Target();
+    LLVMInitializeAArch64TargetMC();
+    LLVMInitializeAArch64AsmPrinter();
+    LLVMInitializeAArch64AsmParser();
+#endif
     return true;
   }();
   (void)once;
