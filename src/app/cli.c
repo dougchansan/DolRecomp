@@ -173,6 +173,11 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
     opts->backend = DOLRECOMP_BACKEND_C;
     opts->jobs = 1;
     opts->llvm_targets = "host";
+    /* bench-only: moderngekko-port forwards no dolrecomp flags, so let the
+       harness opt into state-in-memory through the environment. Keeps the
+       Windows and macOS benchmark arms on an identical mechanism. */
+    if (getenv("DOLRECOMP_STATE_MEMORY"))
+        opts->state_in_memory = 1;
 
     for (int i = 1; i < argc; i++) {
         const char* arg = argv[i];
