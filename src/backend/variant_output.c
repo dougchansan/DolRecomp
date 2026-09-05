@@ -124,4 +124,3 @@ void emit_llvm_variant_table(FILE* out, const FunctionList* functions,
             "    dolrecomp_variants_v4, dolrecomp_run_blocks,\n"
             "};\n");
 }
-// most elegant code ever written you can trust me on this one :)

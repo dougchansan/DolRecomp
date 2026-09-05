@@ -98,7 +98,7 @@ int main(int argc, char **argv) {
   CHECK(nativeCallee->getCallingConv() == llvm::CallingConv::Fast);
   CHECK(nativeCaller->getReturnType()->isStructTy());
   CHECK(nativeCallee->getReturnType()->isStructTy());
-  CHECK(nativeCaller->arg_size() == 8);
+  CHECK(nativeCaller->arg_size() == 7);
   CHECK(nativeCallee->arg_size() == 8);
   CHECK(llvm::cast<llvm::StructType>(nativeCaller->getReturnType())
             ->getNumElements() == 3);
@@ -193,8 +193,13 @@ int main(int argc, char **argv) {
   CHECK(psq_fma != nullptr);
   unsigned psq_single_fma = 0;
   unsigned psq_strict_fma = 0;
-  for (llvm::BasicBlock &block : *psq_fma)
-    for (llvm::Instruction &instruction : block)
+  unsigned dynamic_psq_loads = 0;
+  for (llvm::BasicBlock &block : *psq_fma) {
+    for (llvm::Instruction &instruction : block) {
+      if (auto *typeSwitch = llvm::dyn_cast<llvm::SwitchInst>(&instruction)) {
+        if (block.getName().starts_with("psq_load_dispatch"))
+          dynamic_psq_loads += typeSwitch->getNumCases() == 5;
+      }
       if (auto *call = llvm::dyn_cast<llvm::CallBase>(&instruction))
         if (call->getCalledFunction()) {
           llvm::StringRef name = call->getCalledFunction()->getName();
@@ -202,8 +207,11 @@ int main(int argc, char **argv) {
           psq_single_fma += name == "llvm.experimental.constrained.fma.v4f32";
           psq_strict_fma += name == "llvm.experimental.constrained.fma.v2f64";
         }
+    }
+  }
   CHECK(psq_single_fma == 1);
   CHECK(psq_strict_fma == 1);
+  CHECK(dynamic_psq_loads == 2);
 
   unsigned psq_enable_guards = 0;
   unsigned ni_guards = 0;
@@ -304,7 +312,7 @@ int main(int argc, char **argv) {
       llvm::parseIRFile(argv[6], diagnostic, context);
   CHECK(split != nullptr);
   llvm::Function *splitCaller = split->getFunction("func_80004000_budget");
-  CHECK(splitCaller != nullptr && splitCaller->arg_size() == 8);
+  CHECK(splitCaller != nullptr && splitCaller->arg_size() == 7);
   CHECK(splitCaller->getCallingConv() == llvm::CallingConv::Fast);
   CHECK(splitCaller->getReturnType()->isStructTy());
   llvm::CallBase *splitCall = nullptr;
@@ -347,8 +355,7 @@ int main(int argc, char **argv) {
     }
     return value == context;
   };
-  auto noStateStoresBefore = [&](llvm::CallBase *call,
-                                 llvm::Function *caller) {
+  auto noStateStoresBefore = [&](llvm::CallBase *call, llvm::Function *caller) {
     for (llvm::Instruction &instruction : *call->getParent()) {
       if (&instruction == call)
         break;
@@ -405,11 +412,20 @@ int main(int argc, char **argv) {
   for (u32 index = 0; index < 3; index++)
     mark_output(pressure,
                 static_cast<DolIRStateSlot>(DOLIR_STATE_FPR0 + index));
+  DolLLVMFunctionRange rejected{};
+  rejected.start = 0x80005100u;
+  rejected.end = 0x80005104u;
+  rejected.direct_memory_accesses = 2;
+  rejected.generic_memory_accesses = 3;
+  rejected.helper_calls = 1;
+  DolLLVMFunctionRange statsRanges[] = {pressure, rejected};
   FILE *stats = std::tmpfile();
   CHECK(stats != nullptr);
-  dolllvm_report_abi_stats(&pressure, 1, "x86_64-pc-linux-gnu", stats);
+  dolllvm_report_abi_stats(statsRanges, 2, "x86_64-pc-linux-gnu", stats);
   std::string report = read_stream(stats);
   CHECK(report.find("sret_functions=0 cycle_memory_functions=1") !=
+        std::string::npos);
+  CHECK(report.find("direct_memory=2 generic_memory=3 helpers=1") !=
         std::string::npos);
   std::fclose(stats);
 

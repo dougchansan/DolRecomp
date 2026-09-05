@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include "common/types.h"
 #include "backend/emitter.h"
+#include "backend/llvm/llvm_backend.h"
 
 typedef enum {
     DOLRECOMP_BACKEND_C,
@@ -18,12 +19,15 @@ typedef struct {
     const char* llvm_targets;
     const char* profile_generate_path;
     const char* profile_use_path;
+    const char* game_id;
     DolRecompCPU cpu;
     DolRecompBackend backend;
     u32 jobs;
     u32 rel_base;
     u32 partition_instructions;
     u64 partition_seed;
+    DolLLVMNativeABIPolicy llvm_native_abi;
+    DolLLVMRuntime llvm_runtime;
     int gamecube_mode;
     int cpu_explicit;
     int rel_base_set;

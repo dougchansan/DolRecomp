@@ -8,8 +8,10 @@
 namespace dolllvm {
 
 void prepareModuleABIs(const DolIRModule &source,
-                       std::vector<DolLLVMFunctionRange> &ranges);
+                       std::vector<DolLLVMFunctionRange> &ranges,
+                       DolLLVMRuntime runtime);
+bool needsInterpreter(const DolIRBlock &block);
 
-}
+} // namespace dolllvm
 
 #endif

@@ -34,6 +34,10 @@ void function_list_free(FunctionList* list) {
 }
 
 int function_list_add(FunctionList* list, u32 start, u32 end) {
+    return function_list_add_hashed(list, start, end, 0);
+}
+
+int function_list_add_hashed(FunctionList* list, u32 start, u32 end, u64 hash) {
     if (list->count == list->capacity) {
         u32 new_capacity = list->capacity ? list->capacity * 2u : 64u;
         FunctionRange* new_ranges =
@@ -48,6 +52,7 @@ int function_list_add(FunctionList* list, u32 start, u32 end) {
 
     list->ranges[list->count].start = start;
     list->ranges[list->count].end = end;
+    list->ranges[list->count].hash = hash;
     list->count++;
     return 1;
 }

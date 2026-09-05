@@ -14,6 +14,9 @@ namespace dolllvm {
 using namespace llvm;
 
 bool FunctionEmitter::emitWrapper(raw_ostream &diagnostics) {
+  if (modern_runtime_)
+    return emitModernWrapper(diagnostics);
+
   auto *pointer = PointerType::getUnqual(context_);
   auto *type = FunctionType::get(Type::getVoidTy(context_), {pointer}, false);
   const std::string wrapperName = symbolName(source_.name);

@@ -4,8 +4,8 @@
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/GlobalVariable.h>
-#include <llvm/IR/Module.h>
 #include <llvm/IR/MDBuilder.h>
+#include <llvm/IR/Module.h>
 #include <llvm/Support/Alignment.h>
 
 namespace dolllvm {
@@ -16,10 +16,11 @@ Value *FunctionEmitter::normalizeAddress(Value *address) {
   return builder_.CreateAnd(address, builder_.getInt32(~0x40000000u));
 }
 
-Value *FunctionEmitter::provenMemoryPointer(
-    const DolIRInstruction &instruction, Value *address, u32 width,
-    Value **offset) {
-  if (!fixed_memory_layout_ || instruction.address_domain != DOLIR_ADDRESS_MEM1 ||
+Value *FunctionEmitter::provenMemoryPointer(const DolIRInstruction &instruction,
+                                            Value *address, u32 width,
+                                            Value **offset) {
+  if (!fixed_memory_layout_ ||
+      instruction.address_domain != DOLIR_ADDRESS_MEM1 ||
       instruction.address_lower != instruction.address_upper)
     return nullptr;
   auto *constant = dyn_cast<ConstantInt>(address);
@@ -54,45 +55,6 @@ Value *FunctionEmitter::endianLoad(Value *pointer, Type *resultType,
   return loaded;
 }
 
-Value *FunctionEmitter::externalRead(Value *address, u32 width) {
-  Type *ptr = PointerType::getUnqual(context_);
-  Value *fn = loadOffset(ptr, offsetof(CPUState, external_read));
-  BasicBlock *call = BasicBlock::Create(context_, "read_external", function_);
-  BasicBlock *zero = BasicBlock::Create(context_, "read_unmapped", function_);
-  BasicBlock *join = BasicBlock::Create(context_, "read_slow_join", function_);
-  builder_.CreateCondBr(builder_.CreateIsNotNull(fn), call, zero,
-                        MDBuilder(context_).createBranchWeights(2000, 1));
-  builder_.SetInsertPoint(call);
-  materialize(current_pc_);
-  auto *functionType = FunctionType::get(
-      Type::getInt64Ty(context_),
-      {ptr, Type::getInt32Ty(context_), Type::getInt8Ty(context_)}, false);
-  Value *called = builder_.CreateCall(functionType, fn,
-                                      {ctx_, address, builder_.getInt8(width)});
-  Value *exception =
-      loadOffset(Type::getInt32Ty(context_), offsetof(CPUState, exception));
-  BasicBlock *resume =
-      BasicBlock::Create(context_, "read_slow_resume", function_);
-  BasicBlock *failed =
-      BasicBlock::Create(context_, "read_slow_exit", function_);
-  builder_.CreateCondBr(builder_.CreateICmpEQ(exception, builder_.getInt32(0)),
-                        resume, failed);
-  builder_.SetInsertPoint(failed);
-  returnFromBody();
-  builder_.SetInsertPoint(resume);
-  reloadUsedState();
-  builder_.CreateBr(join);
-  BasicBlock *calledEnd = builder_.GetInsertBlock();
-  builder_.SetInsertPoint(zero);
-  Value *empty = builder_.getInt64(0);
-  builder_.CreateBr(join);
-  builder_.SetInsertPoint(join);
-  PHINode *phi = builder_.CreatePHI(Type::getInt64Ty(context_), 2);
-  phi->addIncoming(called, calledEnd);
-  phi->addIncoming(empty, zero);
-  return phi;
-}
-
 Value *FunctionEmitter::emitGuestLoad(const DolIRInstruction &instruction,
                                       Value *address, Type *resultType,
                                       u32 width, bool sign) {
@@ -101,8 +63,8 @@ Value *FunctionEmitter::emitGuestLoad(const DolIRInstruction &instruction,
           provenMemoryPointer(instruction, address, width, &directOffset)) {
     Value *loaded = endianLoad(pointer, resultType, width);
     if (sign && width * 8u < resultType->getIntegerBitWidth()) {
-      Value *narrow = builder_.CreateTrunc(
-          loaded, IntegerType::get(context_, width * 8u));
+      Value *narrow =
+          builder_.CreateTrunc(loaded, IntegerType::get(context_, width * 8u));
       return builder_.CreateSExt(narrow, resultType);
     }
     return loaded;
@@ -205,40 +167,6 @@ void FunctionEmitter::endianStore(Value *pointer, Value *value, u32 width) {
     narrowed = builder_.CreateZExtOrTrunc(value, integerType);
   StoreInst *store = builder_.CreateStore(bswap(narrowed), pointer);
   store->setAlignment(Align(1));
-}
-
-void FunctionEmitter::externalWrite(Value *address, Value *value, u32 width) {
-  Type *ptr = PointerType::getUnqual(context_);
-  Value *fn = loadOffset(ptr, offsetof(CPUState, external_write));
-  BasicBlock *call = BasicBlock::Create(context_, "write_external", function_);
-  BasicBlock *done = BasicBlock::Create(context_, "write_slow_done", function_);
-  builder_.CreateCondBr(builder_.CreateIsNotNull(fn), call, done);
-  builder_.SetInsertPoint(call);
-  materialize(current_pc_);
-  auto *functionType =
-      FunctionType::get(Type::getVoidTy(context_),
-                        {ptr, Type::getInt32Ty(context_),
-                         Type::getInt64Ty(context_), Type::getInt8Ty(context_)},
-                        false);
-  builder_.CreateCall(
-      functionType, fn,
-      {ctx_, address,
-       builder_.CreateZExtOrTrunc(value, Type::getInt64Ty(context_)),
-       builder_.getInt8(width)});
-  Value *exception =
-      loadOffset(Type::getInt32Ty(context_), offsetof(CPUState, exception));
-  BasicBlock *resume =
-      BasicBlock::Create(context_, "write_slow_resume", function_);
-  BasicBlock *failed =
-      BasicBlock::Create(context_, "write_slow_exit", function_);
-  builder_.CreateCondBr(builder_.CreateICmpEQ(exception, builder_.getInt32(0)),
-                        resume, failed);
-  builder_.SetInsertPoint(failed);
-  returnFromBody();
-  builder_.SetInsertPoint(resume);
-  reloadUsedState();
-  builder_.CreateBr(done);
-  builder_.SetInsertPoint(done);
 }
 
 void FunctionEmitter::emitGuestStore(const DolIRInstruction &instruction,

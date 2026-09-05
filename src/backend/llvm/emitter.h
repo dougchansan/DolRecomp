@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include <llvm/ADT/ArrayRef.h>
 #include <llvm/ADT/StringRef.h>
 #include <llvm/IR/CallingConv.h>
 #include <llvm/IR/IRBuilder.h>
@@ -60,11 +61,18 @@ private:
   llvm::CallingConv::ID bodyCallingConvention() const;
   llvm::Type *nativeResultType(const DolLLVMFunctionRange *range);
   llvm::StructType *chainType();
+  llvm::StructType *runtimeType();
+  llvm::StructType *stateInterfaceType();
   bool stateInput(const DolLLVMFunctionRange *range, DolIRStateSlot slot) const;
   bool stateOutput(const DolLLVMFunctionRange *range,
                    DolIRStateSlot slot) const;
   std::size_t stateOffset(DolIRStateSlot slot) const;
   llvm::Value *bytePtr(std::size_t offset);
+  llvm::Value *runtimeField(u32 field);
+  llvm::Value *stateField(u32 field);
+  llvm::Value *callStateRead(u32 field, llvm::ArrayRef<llvm::Value *> arguments,
+                             llvm::Type *result_type);
+  void callStateWrite(u32 field, llvm::ArrayRef<llvm::Value *> arguments);
   llvm::Value *loadContext(DolIRStateSlot slot);
   void storeContext(DolIRStateSlot slot, llvm::Value *value);
   llvm::Value *loadOffset(llvm::Type *value_type, std::size_t offset);
@@ -79,9 +87,14 @@ private:
 
   void emitEntry();
   bool emitWrapper(llvm::raw_ostream &diagnostics);
+  bool emitModernWrapper(llvm::raw_ostream &diagnostics);
   void chargeCycles(u32 cycles);
   void chargeCycles(llvm::Value *cycles);
+  llvm::Value *emitTimebaseRead();
+  void emitTimebaseWrite(const DolIRInstruction &inst);
   void syncDirtyState();
+  void commitModernState();
+  void reloadModernState();
   void settleCycles();
   void flushCallCounters(bool force_cycles = false);
   void reloadCallCounters();
@@ -103,7 +116,7 @@ private:
                           const DolLLVMFunctionRange *range);
   void materialize(u32 pc);
   void materialize(llvm::Value *pc);
-  void sideExit(u32 pc);
+  void sideExit(u32 pc, u32 reason = 0);
   void emitBudgetGuard(u32 pc);
   bool emitRegion(u32 index, llvm::raw_ostream &diagnostics);
   llvm::Value *operand(const DolIRInstruction &instruction, u32 index);
@@ -160,10 +173,13 @@ private:
   llvm::Value *emitSPRRead(const DolIRInstruction &instruction);
   void emitSPRWrite(const DolIRInstruction &instruction);
   void emitLSWX(const DolIRInstruction &instruction);
+  void emitCacheControl(const DolIRInstruction &instruction);
+  void emitInstructionService(u32 pc);
   llvm::Value *emitRuntimeBoundary(const DolIRInstruction &instruction);
   void emitExactFloat(u64 descriptor);
   void emitExactPaired(u64 descriptor);
   llvm::Value *emitPSQ(const DolIRInstruction &instruction);
+  llvm::Value *emitPSQLoad(const DolIRInstruction &, llvm::Value *, llvm::Value *, llvm::Value *);
   llvm::Value *emitKnownPSQ(const DolIRInstruction &instruction, u32 type,
                             s32 scale);
   void emitStoreConditional(const DolIRInstruction &instruction);
@@ -187,8 +203,8 @@ private:
   void journal(llvm::Value *offset, u32 width);
   void endianStore(llvm::Value *pointer, llvm::Value *value, u32 width);
   void externalWrite(llvm::Value *address, llvm::Value *value, u32 width);
-  void emitGuestStore(const DolIRInstruction &instruction,
-                      llvm::Value *address, llvm::Value *value, u32 width);
+  void emitGuestStore(const DolIRInstruction &instruction, llvm::Value *address,
+                      llvm::Value *value, u32 width);
   void emitGuestStore(llvm::Value *address, llvm::Value *value, u32 width);
 
   llvm::BasicBlock *directDestination(const DolIRTerminator &terminator,
@@ -210,6 +226,7 @@ private:
   llvm::IRBuilder<> builder_;
   llvm::Function *function_ = nullptr;
   llvm::Argument *ctx_ = nullptr;
+  llvm::Argument *state_interface_ = nullptr;
   llvm::Argument *chain_ = nullptr;
   llvm::BasicBlock *entry_ = nullptr;
   llvm::AllocaInst *cycles_ = nullptr;
@@ -272,12 +289,12 @@ private:
   std::string symbol_suffix_;
   bool fixed_memory_layout_ = false;
   bool state_in_memory_ = false;
+  bool modern_runtime_ = false;
   u32 expected_ram_size_ = 0;
   u32 expected_mem2_size_ = 0;
   u32 current_pc_ = 0;
   bool fp_available_checked_ = false;
 };
-
 } // namespace dolllvm
 
 #endif

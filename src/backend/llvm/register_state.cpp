@@ -1,4 +1,5 @@
 #include "backend/llvm/emitter.h"
+#include "backend/llvm/native_abi.h"
 #include "cpu/cpu.h"
 
 #include <llvm/ADT/SmallVector.h>
@@ -76,6 +77,13 @@ void FunctionEmitter::scanState() {
     const DolIRBlock &block = source_.blocks[b];
     for (u32 i = 0; i < block.instruction_count; i++) {
       const DolIRInstruction &inst = block.instructions[i];
+      if (!modern_runtime_ && inst.op == DOLIR_OP_HELPER_CALL &&
+          (inst.aux == DOLIR_HELPER_TIMEBASE_READ ||
+           inst.aux == DOLIR_HELPER_TIMEBASE_WRITE)) {
+        used_[DOLIR_STATE_TIMEBASE] = true;
+        dirty_[DOLIR_STATE_TIMEBASE] = dirty_[DOLIR_STATE_TIMEBASE] ||
+                                       inst.aux == DOLIR_HELPER_TIMEBASE_WRITE;
+      }
       for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++) {
         auto stateSlot = static_cast<DolIRStateSlot>(slot);
         bool reads = dolir_state_mask_test(inst.state_uses, stateSlot);
@@ -133,6 +141,11 @@ void FunctionEmitter::scanRegionLeaders() {
     return;
   region_leaders_[0] = true;
   for (u32 i = 0; i < source_.block_count; i++) {
+    if (modern_runtime_ && native_abi_ && needsInterpreter(source_.blocks[i])) {
+      region_leaders_[i] = true;
+      if (i + 1u < source_.block_count)
+        region_leaders_[i + 1u] = true;
+    }
     const DolIRTerminator &term = source_.blocks[i].terminator;
     if (term.kind == DOLIR_TERM_FALLBACK)
       region_leaders_[i] = true;
@@ -159,59 +172,6 @@ void FunctionEmitter::scanRegionLeaders() {
 Value *FunctionEmitter::bytePtr(size_t offset) {
   return builder_.CreateInBoundsGEP(Type::getInt8Ty(context_), ctx_,
                                     builder_.getInt64(offset));
-}
-
-Value *FunctionEmitter::loadContext(DolIRStateSlot slot) {
-  if (slot >= DOLIR_STATE_CR0 && slot <= DOLIR_STATE_CR7) {
-    Value *packed = builder_.CreateLoad(Type::getInt32Ty(context_),
-                                        bytePtr(offsetof(CPUState, cr)));
-    const u32 shift = 28u - 4u * (slot - DOLIR_STATE_CR0);
-    return builder_.CreateAnd(builder_.CreateLShr(packed, shift),
-                              builder_.getInt32(0xFu));
-  }
-  if (slot >= DOLIR_STATE_XER_CA && slot <= DOLIR_STATE_XER_SO) {
-    Value *packed = builder_.CreateLoad(Type::getInt32Ty(context_),
-                                        bytePtr(offsetof(CPUState, xer)));
-    const u32 shift = 29u + (slot - DOLIR_STATE_XER_CA);
-    return builder_.CreateTrunc(builder_.CreateLShr(packed, shift),
-                                Type::getInt1Ty(context_));
-  }
-  return builder_.CreateLoad(type(dolir_state_type(slot)),
-                             bytePtr(stateOffset(slot)));
-}
-
-void FunctionEmitter::storeContext(DolIRStateSlot slot, Value *value) {
-  if (slot >= DOLIR_STATE_CR0 && slot <= DOLIR_STATE_CR7) {
-    Value *pointer = bytePtr(offsetof(CPUState, cr));
-    Value *packed = builder_.CreateLoad(Type::getInt32Ty(context_), pointer);
-    const u32 shift = 28u - 4u * (slot - DOLIR_STATE_CR0);
-    const u32 mask = 0xFu << shift;
-    Value *kept = builder_.CreateAnd(packed, builder_.getInt32(~mask));
-    Value *field = builder_.CreateShl(
-        builder_.CreateAnd(value, builder_.getInt32(0xFu)), shift);
-    builder_.CreateStore(builder_.CreateOr(kept, field), pointer);
-    return;
-  }
-  if (slot >= DOLIR_STATE_XER_CA && slot <= DOLIR_STATE_XER_SO) {
-    Value *pointer = bytePtr(offsetof(CPUState, xer));
-    Value *packed = builder_.CreateLoad(Type::getInt32Ty(context_), pointer);
-    const u32 shift = 29u + (slot - DOLIR_STATE_XER_CA);
-    const u32 mask = 1u << shift;
-    Value *kept = builder_.CreateAnd(packed, builder_.getInt32(~mask));
-    Value *bit = builder_.CreateShl(
-        builder_.CreateZExt(value, Type::getInt32Ty(context_)), shift);
-    builder_.CreateStore(builder_.CreateOr(kept, bit), pointer);
-    return;
-  }
-  if (slot == DOLIR_STATE_XER) {
-    Value *pointer = bytePtr(offsetof(CPUState, xer));
-    Value *packed = builder_.CreateLoad(Type::getInt32Ty(context_), pointer);
-    Value *flags = builder_.CreateAnd(packed, builder_.getInt32(0xE0000000u));
-    Value *misc = builder_.CreateAnd(value, builder_.getInt32(0x1FFFFFFFu));
-    builder_.CreateStore(builder_.CreateOr(flags, misc), pointer);
-    return;
-  }
-  builder_.CreateStore(value, bytePtr(stateOffset(slot)));
 }
 
 Value *FunctionEmitter::loadOffset(Type *valueType, size_t offset) {

@@ -63,44 +63,68 @@ void FunctionEmitter::emitEntry() {
                          : loadContext(stateSlot);
     builder_.CreateStore(initial, state_[slot]);
   }
-
   BasicBlock *nativeEntry =
       BasicBlock::Create(context_, "native_entry", function_);
   BasicBlock *query =
       BasicBlock::Create(context_, "interception_query", function_);
-  Value *hostCall = loadOffset(pointer, offsetof(CPUState, host_call));
   Function *expect = Intrinsic::getDeclaration(&module_, Intrinsic::expect,
                                                {Type::getInt1Ty(context_)});
-  Value *noInterception = builder_.CreateCall(
-      expect, {builder_.CreateIsNull(hostCall), builder_.getTrue()});
-  builder_.CreateCondBr(noInterception, nativeEntry, query);
-
+  if (modern_runtime_) {
+    builder_.CreateBr(query);
+  } else {
+    Value *hostCall = loadOffset(pointer, offsetof(CPUState, host_call));
+    Value *noInterception = builder_.CreateCall(
+        expect, {builder_.CreateIsNull(hostCall), builder_.getTrue()});
+    builder_.CreateCondBr(noInterception, nativeEntry, query);
+  }
   builder_.SetInsertPoint(query);
-  auto available = module_.getOrInsertFunction(
-      "ppc_native_region_available",
-      FunctionType::get(
-          Type::getInt1Ty(context_),
-          {pointer, Type::getInt32Ty(context_), Type::getInt32Ty(context_)},
-          false));
-  Value *canEnter = builder_.CreateCall(
-      available, {ctx_, builder_.getInt32(source_.guest_start),
-                  builder_.getInt32(source_.guest_end)});
+  FunctionCallee available;
+  Value *canEnter = nullptr;
+  if (modern_runtime_) {
+    available = module_.getOrInsertFunction(
+        "moderngekko_native_region_available",
+        FunctionType::get(Type::getInt1Ty(context_),
+            {pointer, Type::getInt32Ty(context_), Type::getInt32Ty(context_)},
+            false));
+    canEnter = builder_.CreateCall(available, {ctx_,
+                                        builder_.getInt32(source_.guest_start),
+                                        builder_.getInt32(source_.guest_end)});
+  } else {
+    available = module_.getOrInsertFunction(
+        "ppc_native_region_available",
+        FunctionType::get(
+            Type::getInt1Ty(context_),
+            {pointer, Type::getInt32Ty(context_), Type::getInt32Ty(context_)},
+            false));
+    canEnter = builder_.CreateCall(
+        available, {ctx_, builder_.getInt32(source_.guest_start),
+                    builder_.getInt32(source_.guest_end)});
+  }
   canEnter = builder_.CreateCall(expect, {canEnter, builder_.getTrue()});
   BasicBlock *intercept =
       BasicBlock::Create(context_, "interception_exit", function_);
   builder_.CreateCondBr(canEnter, nativeEntry, intercept);
-
   builder_.SetInsertPoint(intercept);
+  if (modern_runtime_)
+    builder_.CreateStore(builder_.getInt32(4),
+                         builder_.CreateStructGEP(chainType(), chain_, 7));
   materialize(entry_pc_);
   returnFromBody();
 
   builder_.SetInsertPoint(nativeEntry);
-  ram_ = loadOffset(pointer, offsetof(CPUState, ram));
-  ram_size_ =
-      loadOffset(Type::getInt32Ty(context_), offsetof(CPUState, ram_size));
-  mem2_ = loadOffset(pointer, offsetof(CPUState, exram));
-  mem2_size_ =
-      loadOffset(Type::getInt32Ty(context_), offsetof(CPUState, exram_size));
+  if (modern_runtime_) {
+    ram_ = runtimeField(3);
+    ram_size_ = runtimeField(4);
+    mem2_ = runtimeField(6);
+    mem2_size_ = runtimeField(7);
+  } else {
+    ram_ = loadOffset(pointer, offsetof(CPUState, ram));
+    ram_size_ =
+        loadOffset(Type::getInt32Ty(context_), offsetof(CPUState, ram_size));
+    mem2_ = loadOffset(pointer, offsetof(CPUState, exram));
+    mem2_size_ =
+        loadOffset(Type::getInt32Ty(context_), offsetof(CPUState, exram_size));
+  }
   Function *assume = Intrinsic::getDeclaration(&module_, Intrinsic::assume);
   Value *ramSizeValid =
       fixed_memory_layout_
@@ -137,17 +161,34 @@ void FunctionEmitter::emitEntry() {
   emitColdEntry(bad);
 }
 
-void FunctionEmitter::chargeCycles(u32 cycles) {
-  chargeCycles(ConstantInt::get(Type::getInt64Ty(context_), cycles));
-}
-
-void FunctionEmitter::chargeCycles(Value *cycles) {
-  Value *old = builder_.CreateLoad(Type::getInt64Ty(context_), cycles_);
-  Value *next = builder_.CreateAdd(old, cycles);
-  builder_.CreateStore(next, cycles_);
-}
-
 void FunctionEmitter::syncDirtyState() {
+  if (modern_runtime_) {
+    ArrayType *valuesType =
+        ArrayType::get(Type::getInt64Ty(context_), DOLIR_STATE_COUNT);
+    Value *values = builder_.CreateStructGEP(chainType(), chain_, 8);
+    auto stage = [&](DolIRStateSlot slot, Value *value) {
+      if (value->getType()->isDoubleTy())
+        value = builder_.CreateBitCast(value, Type::getInt64Ty(context_));
+      else
+        value = builder_.CreateZExtOrTrunc(value,
+                                           Type::getInt64Ty(context_));
+      builder_.CreateStore(
+          value, builder_.CreateInBoundsGEP(
+                     valuesType, values,
+                     {builder_.getInt64(0), builder_.getInt64(slot)}));
+    };
+    for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++) {
+      if (!dirty_[slot] || slot == DOLIR_STATE_FPSCR)
+        continue;
+      auto stateSlot = static_cast<DolIRStateSlot>(slot);
+      if (!slotInMemory(stateSlot))
+        stage(stateSlot, stateValue(stateSlot));
+    }
+    materializeFPRF();
+    if (dirty_[DOLIR_STATE_FPSCR])
+      stage(DOLIR_STATE_FPSCR, stateValue(DOLIR_STATE_FPSCR));
+    return;
+  }
   for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++) {
     if (!dirty_[slot] || slot == DOLIR_STATE_FPSCR)
       continue;
@@ -163,42 +204,46 @@ void FunctionEmitter::syncDirtyState() {
     storeContext(DOLIR_STATE_FPSCR, stateValue(DOLIR_STATE_FPSCR));
 }
 
-void FunctionEmitter::settleCycles() {
-  Value *downcount =
-      loadOffset(Type::getInt64Ty(context_), offsetof(CPUState, downcount));
-  Value *cycles = builder_.CreateLoad(Type::getInt64Ty(context_), cycles_);
-  builder_.CreateStore(builder_.CreateSub(downcount, cycles),
-                       bytePtr(offsetof(CPUState, downcount)));
-  Value *guard =
-      builder_.CreateLoad(Type::getInt64Ty(context_), guard_cycles_local_);
-  builder_.CreateStore(builder_.CreateAdd(guard, cycles), guard_cycles_local_);
-  builder_.CreateStore(builder_.getInt64(0), cycles_);
-  builder_.CreateStore(builder_.getInt64(0), pending_cycles_);
-}
-
-void FunctionEmitter::flushCallCounters(bool forceCycles) {
-  if (forceCycles || !nativeCyclesInResult(abi_range_))
-    builder_.CreateStore(
-        builder_.CreateLoad(Type::getInt64Ty(context_), cycles_),
-        pending_cycles_);
-  if (!native_abi_ || !cold_escapes_)
-    builder_.CreateStore(
-        builder_.CreateLoad(Type::getInt64Ty(context_), guard_cycles_local_),
-        guard_cycles_);
-}
-
-void FunctionEmitter::reloadCallCounters() {
-  builder_.CreateStore(
-      builder_.CreateLoad(Type::getInt64Ty(context_), pending_cycles_),
-      cycles_);
-  if (!native_abi_ || !cold_escapes_)
-    builder_.CreateStore(
-        builder_.CreateLoad(Type::getInt64Ty(context_), guard_cycles_),
-        guard_cycles_local_);
+void FunctionEmitter::commitModernState() {
+  if (!modern_runtime_)
+    return;
+  ArrayType *maskType =
+      ArrayType::get(Type::getInt64Ty(context_), DOLIR_STATE_MASK_WORDS);
+  const std::string name = source_.name + std::string(".dirty");
+  GlobalVariable *mask = module_.getGlobalVariable(name, true);
+  if (!mask) {
+    std::vector<Constant *> words;
+    for (u32 word = 0; word < DOLIR_STATE_MASK_WORDS; word++) {
+      u64 bits = 0;
+      for (u32 bit = 0; bit < 64; bit++) {
+        const u32 slot = word * 64u + bit;
+        if (slot < DOLIR_STATE_COUNT && dirty_[slot])
+          bits |= 1ull << bit;
+      }
+      words.push_back(builder_.getInt64(bits));
+    }
+    mask = new GlobalVariable(module_, maskType, true,
+                              GlobalValue::PrivateLinkage,
+                              ConstantArray::get(maskType, words), name);
+  }
+  Type *pointer = PointerType::getUnqual(context_);
+  FunctionCallee commit = module_.getOrInsertFunction(
+      "moderngekko_commit_state",
+      FunctionType::get(Type::getVoidTy(context_),
+                        {pointer, pointer, pointer}, false));
+  if (auto *function = dyn_cast<Function>(commit.getCallee())) {
+    function->addFnAttr(Attribute::Cold);
+    function->addFnAttr(Attribute::NoUnwind);
+  }
+  Value *values = builder_.CreateStructGEP(chainType(), chain_, 8);
+  CallInst *call = builder_.CreateCall(commit, {state_interface_, values, mask});
+  call->addFnAttr(Attribute::Cold);
+  call->addFnAttr(Attribute::NoUnwind);
 }
 
 void FunctionEmitter::returnFromBody() {
-  flushCallCounters();
+  if (!cold_escapes_)
+    flushCallCounters();
   if (native_abi_) {
     if (cold_escapes_) {
       Value *buffer = builder_.CreateStructGEP(chainType(), chain_, 0);
@@ -234,39 +279,22 @@ void FunctionEmitter::materialize(u32 pc) {
 
 void FunctionEmitter::materialize(Value *pc) {
   syncDirtyState();
-  storeContext(DOLIR_STATE_PC, pc);
+  if (modern_runtime_) {
+    builder_.CreateStore(pc, builder_.CreateStructGEP(chainType(), chain_, 5));
+    builder_.CreateStore(builder_.CreateAdd(pc, builder_.getInt32(4)),
+                         builder_.CreateStructGEP(chainType(), chain_, 6));
+  } else {
+    storeContext(DOLIR_STATE_PC, pc);
+  }
   settleCycles();
+  commitModernState();
 }
-
-void FunctionEmitter::sideExit(u32 pc) {
+void FunctionEmitter::sideExit(u32 pc, u32 reason) {
+  if (modern_runtime_)
+    builder_.CreateStore(builder_.getInt32(reason),
+                         builder_.CreateStructGEP(chainType(), chain_, 7));
   materialize(pc);
   returnFromBody();
-}
-
-void FunctionEmitter::emitBudgetGuard(u32 pc) {
-  // Guard the whole native call chain, not one generated function.
-  Value *cycles = builder_.CreateAdd(
-      builder_.CreateLoad(Type::getInt64Ty(context_), guard_cycles_local_),
-      builder_.CreateLoad(Type::getInt64Ty(context_), cycles_));
-  Value *over_cycles = builder_.CreateICmpUGE(
-      cycles, ConstantInt::get(Type::getInt64Ty(context_), 256));
-  Value *exhausted = over_cycles;
-  if (!native_abi_ || !cold_escapes_) {
-    Value *steps =
-        builder_.CreateLoad(Type::getInt64Ty(context_), guard_steps_);
-    Value *next_steps = builder_.CreateAdd(
-        steps, ConstantInt::get(Type::getInt64Ty(context_), 1));
-    builder_.CreateStore(next_steps, guard_steps_);
-    Value *over_steps = builder_.CreateICmpUGE(
-        next_steps, ConstantInt::get(Type::getInt64Ty(context_), 2048));
-    exhausted = builder_.CreateOr(over_cycles, over_steps);
-  }
-  BasicBlock *run = BasicBlock::Create(context_, "budget_run", function_);
-  BasicBlock *exit = BasicBlock::Create(context_, "budget_exit", function_);
-  builder_.CreateCondBr(exhausted, exit, run);
-  builder_.SetInsertPoint(exit);
-  sideExit(pc);
-  builder_.SetInsertPoint(run);
 }
 
 } // namespace dolllvm

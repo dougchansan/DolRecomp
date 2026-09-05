@@ -112,6 +112,16 @@ static void helper_effects(DolIRInstruction* instruction) {
     switch ((DolIRHelper)instruction->aux) {
     case DOLIR_HELPER_FP_AVAILABLE:
         mark(instruction->state_uses, DOLIR_STATE_MSR);
+        mark(instruction->state_uses, DOLIR_STATE_EXCEPTION);
+        mark(instruction->state_defs, DOLIR_STATE_EXCEPTION);
+        break;
+    case DOLIR_HELPER_PROGRAM_EXCEPTION:
+        mark(instruction->state_uses, DOLIR_STATE_EXCEPTION);
+        mark(instruction->state_defs, DOLIR_STATE_EXCEPTION);
+        mark(instruction->state_defs, DOLIR_STATE_SRR1);
+        break;
+    case DOLIR_HELPER_CACHE_CONTROL:
+        mark(instruction->state_uses, DOLIR_STATE_MSR);
         break;
     case DOLIR_HELPER_EXACT_FLOAT:
         exact_float(instruction);

@@ -116,28 +116,37 @@ Value *FunctionEmitter::emitKnownPSQ(const DolIRInstruction &inst, u32 type,
   BasicBlock *fastEnd = builder_.GetInsertBlock();
 
   builder_.SetInsertPoint(slow);
-  materialize(inst.guest_pc);
-  Value *success = builder_.CreateCall(
-      callee, {ctx_, builder_.getInt8(reg), address, builder_.getInt1(w),
-               builder_.getInt8(gqr), builder_.getInt1(indexed),
-               builder_.getInt32(inst.guest_pc)});
-  BasicBlock *resume =
-      BasicBlock::Create(context_, "psq_known_resume", function_);
-  BasicBlock *failed =
-      BasicBlock::Create(context_, "psq_known_exit", function_);
-  builder_.CreateCondBr(success, resume, failed);
-  builder_.SetInsertPoint(failed);
-  returnFromBody();
-  builder_.SetInsertPoint(resume);
-  reloadUsedState();
-  if (load)
-    builder_.CreateStore(roundPairToSingle(pairF64(reg)), pair_f32_[reg]);
-  builder_.CreateBr(join);
+  Value *success = nullptr;
+  BasicBlock *resume = nullptr;
+  if (modern_runtime_) {
+    sideExit(inst.guest_pc, 2);
+  } else {
+    materialize(inst.guest_pc);
+    success = builder_.CreateCall(
+        callee, {ctx_, builder_.getInt8(reg), address, builder_.getInt1(w),
+                 builder_.getInt8(gqr), builder_.getInt1(indexed),
+                 builder_.getInt32(inst.guest_pc)});
+    resume = BasicBlock::Create(context_, "psq_known_resume", function_);
+    BasicBlock *failed =
+        BasicBlock::Create(context_, "psq_known_exit", function_);
+    builder_.CreateCondBr(success, resume, failed);
+    builder_.SetInsertPoint(failed);
+    returnFromBody();
+    builder_.SetInsertPoint(resume);
+    reloadUsedState();
+    if (load)
+      builder_.CreateStore(roundPairToSingle(pairF64(reg)), pair_f32_[reg]);
+    builder_.CreateBr(join);
+  }
 
   builder_.SetInsertPoint(join);
-  PHINode *result = builder_.CreatePHI(Type::getInt1Ty(context_), 2);
-  result->addIncoming(ConstantInt::getTrue(context_), fastEnd);
-  result->addIncoming(success, resume);
+  Value *result = ConstantInt::getTrue(context_);
+  if (!modern_runtime_) {
+    PHINode *merged = builder_.CreatePHI(Type::getInt1Ty(context_), 2);
+    merged->addIncoming(result, fastEnd);
+    merged->addIncoming(success, resume);
+    result = merged;
+  }
   fp_rep_ = incomingRepresentations;
   fp_exact_single_ = incomingExactSingles;
   fp_denormal_safe_ = incomingDenormalSafety;

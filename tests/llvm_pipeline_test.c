@@ -14,8 +14,14 @@
 #include <unistd.h>
 #endif
 
-#define CHECK(x) do { if (!(x)) { fprintf(stderr, "check failed: %s:%d: %s\n", \
-    __FILE__, __LINE__, #x); return 1; } } while (0)
+#define CHECK(x)                                                               \
+    do {                                                                       \
+        if (!(x)) {                                                            \
+            fprintf(stderr, "check failed: %s:%d: %s\n", __FILE__, __LINE__,   \
+                    #x);                                                       \
+            return 1;                                                          \
+        }                                                                      \
+    } while (0)
 
 static int make_dir(const char* path) {
 #if defined(_WIN32)
@@ -32,7 +38,8 @@ static int is_native_object(const u8* magic) {
 #if defined(_WIN32)
     return magic[0] == 0x64 && magic[1] == 0x86;
 #else
-    return magic[0] == 0x7F && magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F';
+    return magic[0] == 0x7F && magic[1] == 'E' && magic[2] == 'L' &&
+           magic[3] == 'F';
 #endif
 }
 
@@ -49,10 +56,11 @@ static int write_dol(const char* path) {
     write_be32(bytes + 0x104, 0x38630001u);
     write_be32(bytes + 0x108, 0x4200FFFCu);
     write_be32(bytes + 0x10C, 0x4E800020u);
-    write_be32(bytes + 0x110, 0x60000000u);
+    write_be32(bytes + 0x110, 0x480000F1u);
     write_be32(bytes + 0x114, 0x60000000u);
     write_be32(bytes + 0x118, 0x60000000u);
     write_be32(bytes + 0x11C, 0x60000000u);
+    write_be32(bytes + 0x200, 0x4E800020u);
     FILE* file = fopen(path, "wb");
     if (!file)
         return 0;
@@ -69,8 +77,35 @@ static int run_generator(const char* executable, const char* dol,
     if (_putenv_s("DOLRECOMP_LLVM_CACHE", cache) != 0)
         return 0;
     return _spawnl(_P_WAIT, executable, executable, "--gamecube",
-                   "--backend=llvm", targets,
-                   "-j2", dol, output, NULL) == 0;
+                   "--backend=llvm", targets, "-j2", dol, output, NULL) == 0;
+#else
+    pid_t child = fork();
+    if (child < 0)
+        return 0;
+    if (child == 0) {
+        setenv("DOLRECOMP_LLVM_CHUNK_INSTRUCTIONS", "512", 1);
+        setenv("DOLRECOMP_LLVM_CACHE", cache, 1);
+        execl(executable, executable, "--gamecube", "--backend=llvm", targets,
+              "-j2", dol, output, NULL);
+        _exit(127);
+    }
+    int status = 0;
+    return waitpid(child, &status, 0) == child && WIFEXITED(status) &&
+           WEXITSTATUS(status) == 0;
+#endif
+}
+
+static int run_native_generator(const char* executable, const char* dol,
+                                const char* output, const char* cache) {
+#if defined(_WIN32)
+    if (_putenv_s("DOLRECOMP_LLVM_CHUNK_INSTRUCTIONS", "512") != 0)
+        return 0;
+    if (_putenv_s("DOLRECOMP_LLVM_CACHE", cache) != 0)
+        return 0;
+    return _spawnl(_P_WAIT, executable, executable, "--gamecube",
+                   "--backend=llvm", "--runtime=moderngekko",
+                   "--game-id=TEST01", "--targets=host", "-j2", dol, output,
+                   NULL) == 0;
 #else
     pid_t child = fork();
     if (child < 0)
@@ -79,7 +114,8 @@ static int run_generator(const char* executable, const char* dol,
         setenv("DOLRECOMP_LLVM_CHUNK_INSTRUCTIONS", "512", 1);
         setenv("DOLRECOMP_LLVM_CACHE", cache, 1);
         execl(executable, executable, "--gamecube", "--backend=llvm",
-              targets, "-j2", dol, output, NULL);
+              "--runtime=moderngekko", "--game-id=TEST01", "--targets=host",
+              "-j2", dol, output, NULL);
         _exit(127);
     }
     int status = 0;
@@ -91,15 +127,15 @@ static int run_generator(const char* executable, const char* dol,
 static int run_c_generator(const char* executable, const char* dol,
                            const char* output) {
 #if defined(_WIN32)
-    return _spawnl(_P_WAIT, executable, executable, "--gamecube",
-                   "--backend=c", dol, output, NULL) == 0;
+    return _spawnl(_P_WAIT, executable, executable, "--gamecube", "--backend=c",
+                   dol, output, NULL) == 0;
 #else
     pid_t child = fork();
     if (child < 0)
         return 0;
     if (child == 0) {
-        execl(executable, executable, "--gamecube", "--backend=c",
-              dol, output, NULL);
+        execl(executable, executable, "--gamecube", "--backend=c", dol, output,
+              NULL);
         _exit(127);
     }
     int status = 0;
@@ -112,8 +148,10 @@ static int files_equal(const char* first, const char* second) {
     FILE* a = fopen(first, "rb");
     FILE* b = fopen(second, "rb");
     if (!a || !b) {
-        if (a) fclose(a);
-        if (b) fclose(b);
+        if (a)
+            fclose(a);
+        if (b)
+            fclose(b);
         return 0;
     }
     int equal = 1;
@@ -122,8 +160,7 @@ static int files_equal(const char* first, const char* second) {
         unsigned char right[4096];
         size_t left_count = fread(left, 1, sizeof(left), a);
         size_t right_count = fread(right, 1, sizeof(right), b);
-        if (left_count != right_count ||
-            memcmp(left, right, left_count) != 0) {
+        if (left_count != right_count || memcmp(left, right, left_count) != 0) {
             equal = 0;
             break;
         }
@@ -142,6 +179,7 @@ int main(int argc, char** argv) {
     char output[1200];
     char header[1200];
     char object[1200];
+    char call_target_object[1200];
     char second_object[1200];
     char v3_object[1200];
     char bitcode[1200];
@@ -150,29 +188,40 @@ int main(int argc, char** argv) {
     char c_output[1200];
     char c_smc[1200];
     char single_output[1200];
+    char native_output[1200];
+    char native_header[1200];
+    char native_object[1200];
     char output_copy[1200];
     char header_copy[1200];
     char object_copy[1200];
+    u8 magic[4];
     snprintf(dol, sizeof(dol), "%s/sample.dol", argv[2]);
     snprintf(output, sizeof(output), "%s/out", argv[2]);
     snprintf(header, sizeof(header), "%s/out/generated/generated.h", argv[2]);
     snprintf(object, sizeof(object),
              "%s/out/generated/chunks/chunk_0000_text0_80003100.o", argv[2]);
+    snprintf(call_target_object, sizeof(call_target_object),
+             "%s/out/generated/chunks/chunk_0002_text0_80003200.o", argv[2]);
     snprintf(second_object, sizeof(second_object),
-             "%s/out/generated/chunks/chunk_0001_text0_80003900.o", argv[2]);
+             "%s/out/generated/chunks/chunk_0004_text0_80003A04.o", argv[2]);
     snprintf(v3_object, sizeof(v3_object),
              "%s/out/generated/chunks/chunk_0000_text0_80003100_x86_64_v3.o",
              argv[2]);
     snprintf(bitcode, sizeof(bitcode),
-             "%s/out/generated/chunks/chunk_0000_text0_80003100.o.bc",
+             "%s/out/generated/chunks/chunk_0000_text0_80003100.o.bc", argv[2]);
+    snprintf(manifest, sizeof(manifest), "%s/out/generated/generated.c",
              argv[2]);
-    snprintf(manifest, sizeof(manifest),
-             "%s/out/generated/generated.c", argv[2]);
     snprintf(cache, sizeof(cache), "%s/cache", argv[2]);
     snprintf(c_output, sizeof(c_output), "%s/out-c", argv[2]);
-    snprintf(c_smc, sizeof(c_smc),
-             "%s/out-c/generated/generated_smc.txt", argv[2]);
+    snprintf(c_smc, sizeof(c_smc), "%s/out-c/generated/generated_smc.txt",
+             argv[2]);
     snprintf(single_output, sizeof(single_output), "%s/out-single", argv[2]);
+    snprintf(native_output, sizeof(native_output), "%s/out-native", argv[2]);
+    snprintf(native_header, sizeof(native_header),
+             "%s/out-native/generated/generated.h", argv[2]);
+    snprintf(native_object, sizeof(native_object),
+             "%s/out-native/generated/chunks/chunk_0000_text0_80003100.o",
+             argv[2]);
     snprintf(output_copy, sizeof(output_copy), "%s/out-copy", argv[2]);
     snprintf(header_copy, sizeof(header_copy),
              "%s/out-copy/generated/generated.h", argv[2]);
@@ -181,10 +230,11 @@ int main(int argc, char** argv) {
              argv[2]);
     CHECK(write_dol(dol));
     CHECK(make_dir(cache));
-    CHECK(run_generator(argv[1], dol, single_output,
-                        "--targets=x86-64-v3", cache));
-    CHECK(run_generator(argv[1], dol, output,
-                        "--targets=x86-64-v2,x86-64-v3", cache));
+    CHECK(run_generator(argv[1], dol, single_output, "--targets=x86-64-v3",
+                        cache));
+    CHECK(run_native_generator(argv[1], dol, native_output, cache));
+    CHECK(run_generator(argv[1], dol, output, "--targets=x86-64-v2,x86-64-v3",
+                        cache));
     CHECK(run_generator(argv[1], dol, output_copy,
                         "--targets=x86-64-v2,x86-64-v3", cache));
     CHECK(run_c_generator(argv[1], dol, c_output));
@@ -201,6 +251,29 @@ int main(int argc, char** argv) {
     CHECK(strstr(text, "DOLRECOMP_MODULE_ABI_V4") != NULL);
     CHECK(strstr(text, "x86-64-v3-exact") != NULL);
     CHECK(strstr(text, "backend/module_abi.h") == NULL);
+    file = fopen(native_header, "rb");
+    CHECK(file != NULL);
+    length = fread(text, 1, sizeof(text) - 1, file);
+    text[length] = '\0';
+    fclose(file);
+    CHECK(strstr(text, "Core/PowerPC/Native/NativeModuleABI.h") != NULL);
+    CHECK(strstr(text, "moderngekko_get_native_module") != NULL);
+    CHECK(strstr(text, "moderngekko_native_region_available") != NULL);
+    CHECK(strstr(text, "moderngekko_native_validate") != NULL);
+    CHECK(strstr(text, "moderngekko_native_validate_all") != NULL);
+    CHECK(strstr(text, "moderngekko_native_hash") != NULL);
+    CHECK(strstr(text, "moderngekko_native_lookup") != NULL);
+    CHECK(strstr(text, "moderngekko_native_needs_validation") != NULL);
+    CHECK(strstr(text, "MODERNGEKKO_NATIVE_DIRTY, memory_order_relaxed") != NULL);
+    CHECK(strstr(text, "\"TEST01\"") != NULL);
+    CHECK(strstr(text, "CPUState") == NULL);
+    CHECK(strstr(text, "moderngekko_commit_state") != NULL);
+    CHECK(strstr(text, "moderngekko_reload_state") != NULL);
+    file = fopen(native_object, "rb");
+    CHECK(file != NULL);
+    CHECK(fread(magic, 1, 4, file) == 4);
+    fclose(file);
+    CHECK(is_native_object(magic));
     file = fopen(manifest, "rb");
     CHECK(file != NULL);
     length = fread(text, 1, sizeof(text) - 1, file);
@@ -209,7 +282,6 @@ int main(int argc, char** argv) {
     CHECK(strstr(text, "// object: chunks/") != NULL);
     file = fopen(object, "rb");
     CHECK(file != NULL);
-    u8 magic[4];
     CHECK(fread(magic, 1, 4, file) == 4);
     fclose(file);
     CHECK(is_native_object(magic));
@@ -219,6 +291,11 @@ int main(int argc, char** argv) {
     CHECK(files_equal(header, header_copy));
     CHECK(files_equal(object, object_copy));
     file = fopen(v3_object, "rb");
+    CHECK(file != NULL);
+    CHECK(fread(magic, 1, 4, file) == 4);
+    fclose(file);
+    CHECK(is_native_object(magic));
+    file = fopen(call_target_object, "rb");
     CHECK(file != NULL);
     CHECK(fread(magic, 1, 4, file) == 4);
     fclose(file);

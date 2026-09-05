@@ -61,6 +61,20 @@ BasicBlock *FunctionEmitter::externalDestination(const DolIRTerminator &term,
   const std::string targetName = symbolName(name);
   if (!nativeTarget)
     syncDirtyState();
+  Value *callDepth = nullptr;
+  if (modern_runtime_ && nativeTarget) {
+    callDepth = builder_.CreateLoad(Type::getInt64Ty(context_), guard_steps_);
+    BasicBlock *invoke = BasicBlock::Create(context_, "call_depth_ok", function_);
+    BasicBlock *yield = BasicBlock::Create(context_, "call_depth_exit", function_);
+    builder_.CreateCondBr(
+        builder_.CreateICmpULT(callDepth, builder_.getInt64(64)), invoke,
+        yield);
+    builder_.SetInsertPoint(yield);
+    sideExit(target);
+    builder_.SetInsertPoint(invoke);
+    builder_.CreateStore(builder_.CreateAdd(callDepth, builder_.getInt64(1)),
+                         guard_steps_);
+  }
   const bool cyclesInResult = nativeTarget && nativeCyclesInResult(range);
   if (!cyclesInResult)
     flushCallCounters(true);
@@ -80,7 +94,11 @@ BasicBlock *FunctionEmitter::externalDestination(const DolIRTerminator &term,
       builder_.CreateShl(
           builder_.CreateZExt(calleeReturnPC, Type::getInt64Ty(context_)),
           builder_.getInt64(32)));
-  SmallVector<Value *, 32> arguments = {ctx_, chain_, control};
+  SmallVector<Value *, 32> arguments = {ctx_};
+  if (modern_runtime_)
+    arguments.push_back(state_interface_);
+  arguments.push_back(chain_);
+  arguments.push_back(control);
   if (nativeTarget) {
     if (cyclesInResult)
       arguments.push_back(
@@ -94,6 +112,8 @@ BasicBlock *FunctionEmitter::externalDestination(const DolIRTerminator &term,
   CallInst *nativeCall = builder_.CreateCall(callee, arguments);
   nativeCall->setCallingConv(bodyCallingConvention());
   if (nativeTarget) {
+    if (callDepth)
+      builder_.CreateStore(callDepth, guard_steps_);
     if (!cyclesInResult)
       reloadCallCounters();
     acceptNativeResult(nativeCall, range);

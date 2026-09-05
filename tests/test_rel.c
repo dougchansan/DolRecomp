@@ -13,6 +13,7 @@
 
 enum {
     R_PPC_ADDR32 = 1,
+    R_PPC_ADDR16_LO = 4,
     R_PPC_REL24 = 10,
     R_DOLPHIN_SECTION = 202,
     R_DOLPHIN_END = 203,
@@ -26,10 +27,10 @@ static void write_relocation(u8* p, u16 offset, u8 type, u8 section,
     write_be32(p + 4, symbol_offset);
 }
 
-static int write_sample_rel_with_id(const char* path, u32 module_id,
-                            u32 import_module,
-                            u8 reloc_type, u8 symbol_section,
-                            u32 symbol_offset, u32 text_size) {
+static int write_sample_rel_with_id_at(const char* path, u32 module_id,
+                                       u32 import_module, u8 reloc_type,
+                                       u8 symbol_section, u32 symbol_offset,
+                                       u32 text_size, u16 patch_offset) {
     u8 file[0x120];
     memset(file, 0, sizeof(file));
 
@@ -42,8 +43,9 @@ static int write_sample_rel_with_id(const char* path, u32 module_id,
     write_be32(file + 0x2C, 8);
     file[0x30] = 1;
     write_be32(file + 0x34, 4);
-    write_be32(file + 0x40, 4);
+    write_be32(file + 0x40, 0x20);
     write_be32(file + 0x44, 4);
+    write_be32(file + 0x48, 0x110);
 
     write_be32(file + 0x50 + 8, 0x100 | 1u);
     write_be32(file + 0x50 + 12, text_size);
@@ -51,13 +53,16 @@ static int write_sample_rel_with_id(const char* path, u32 module_id,
     write_be32(file + 0x50 + 20, 4);
 
     write_relocation(file + 0x80, 0, R_DOLPHIN_SECTION, 1, 0);
-    write_relocation(file + 0x88, 0, reloc_type, symbol_section, symbol_offset);
+    write_relocation(file + 0x88, patch_offset, reloc_type, symbol_section,
+                     symbol_offset);
     write_relocation(file + 0x90, 0, R_DOLPHIN_END, 0, 0);
 
     write_be32(file + 0xA0, import_module);
     write_be32(file + 0xA4, 0x80);
 
-    write_be32(file + 0x100, reloc_type == R_PPC_REL24 ? 0x48000000u : 0);
+    const u32 first_instruction = reloc_type == R_PPC_REL24 ? 0x48000000u :
+                                  reloc_type == R_PPC_ADDR16_LO ? 0x38600000u : 0;
+    write_be32(file + 0x100, first_instruction);
     write_be32(file + 0x104, 0x4E800020u);
     write_be32(file + 0x108, 0x12345678u);
 
@@ -67,6 +72,15 @@ static int write_sample_rel_with_id(const char* path, u32 module_id,
     int ok = fwrite(file, 1, sizeof(file), out) == sizeof(file);
     ok = fclose(out) == 0 && ok;
     return ok;
+}
+
+static int write_sample_rel_with_id(const char* path, u32 module_id,
+                                    u32 import_module, u8 reloc_type,
+                                    u8 symbol_section, u32 symbol_offset,
+                                    u32 text_size) {
+    return write_sample_rel_with_id_at(path, module_id, import_module,
+                                       reloc_type, symbol_section,
+                                       symbol_offset, text_size, 0);
 }
 
 static int write_sample_rel(const char* path, u32 import_module,
@@ -107,6 +121,25 @@ static int test_dol_rel24_relocation(void) {
     s32 delta = sign_extend(inst & 0x03FFFFFCu, 26);
     CHECK(0x80500100u + (u32)delta == 0x80003100u,
           "DOL REL24 relocation target was not applied");
+
+    rel_free(&rel);
+    remove(path);
+    return 1;
+}
+
+static int test_addr16_relocation_uses_halfword_offset(void) {
+    const char* path = "test_addr16.rel";
+    CHECK(write_sample_rel_with_id_at(path, 1, 1, R_PPC_ADDR16_LO, 2, 0,
+                                      8, 2),
+          "failed to write ADDR16 sample REL");
+
+    RELFile rel;
+    CHECK(rel_load(&rel, path, 0x80500000u),
+          "failed to load ADDR16 sample REL");
+    CHECK(read_be32(rel.sections[1].data) == 0x38600108u,
+          "ADDR16 relocation did not patch its halfword");
+    CHECK(read_be32(rel.sections[1].data + 4) == 0x4E800020u,
+          "ADDR16 relocation corrupted the following instruction");
 
     rel_free(&rel);
     remove(path);
@@ -176,13 +209,69 @@ static int test_unaligned_text_rejected(void) {
     return 1;
 }
 
+static int test_section_alignment_is_advisory(void) {
+    const char* path = "test_section_alignment.rel";
+    CHECK(write_sample_rel(path, 1, R_PPC_ADDR32, 2, 0, 8),
+          "failed to write sample REL");
+
+    RELFile rel;
+    CHECK(rel_load(&rel, path, 0x80500004u),
+          "failed to load instruction-aligned REL image");
+    CHECK(rel.entry_point == 0x80500108u, "bad entry 0x%08X", rel.entry_point);
+
+    rel_free(&rel);
+    remove(path);
+    return 1;
+}
+
+static int test_bss_uses_fix_size(void) {
+    const char* path = "test_bss_fix_size.rel";
+    u8 file[0x200];
+    memset(file, 0, sizeof(file));
+
+    write_be32(file + 0x00, 1);
+    write_be32(file + 0x0C, 3);
+    write_be32(file + 0x10, 0x50);
+    write_be32(file + 0x1C, 3);
+    write_be32(file + 0x20, 0x20);
+    file[0x30] = 1;
+    write_be32(file + 0x40, 0x20);
+    write_be32(file + 0x44, 0x40);
+    write_be32(file + 0x48, 0x120);
+    write_be32(file + 0x50 + 8, 0x100 | 1u);
+    write_be32(file + 0x50 + 12, 8);
+    write_be32(file + 0x50 + 20, 0x20);
+    write_be32(file + 0x100, 0x4E800020u);
+
+    FILE* out = fopen(path, "wb");
+    CHECK(out, "failed to create BSS sample REL");
+    int written = fwrite(file, 1, sizeof(file), out) == sizeof(file);
+    written = fclose(out) == 0 && written;
+    CHECK(written, "failed to write BSS sample REL");
+
+    RELFile rel;
+    CHECK(rel_load(&rel, path, 0x80500000u),
+          "failed to load BSS sample REL");
+    CHECK(rel.fix_size == 0x120u, "bad fix size 0x%X", rel.fix_size);
+    CHECK(rel.sections[2].bss, "BSS section was not recognized");
+    CHECK(rel.sections[2].address == 0x80500140u,
+          "BSS ignored fix size: 0x%08X", rel.sections[2].address);
+
+    rel_free(&rel);
+    remove(path);
+    return 1;
+}
+
 int main(void) {
     int ok = 1;
     ok &= test_self_relocation();
     ok &= test_dol_rel24_relocation();
+    ok &= test_addr16_relocation_uses_halfword_offset();
     ok &= test_external_import_rejected();
     ok &= test_external_import_with_map();
     ok &= test_unaligned_text_rejected();
+    ok &= test_section_alignment_is_advisory();
+    ok &= test_bss_uses_fix_size();
 
     if (!ok)
         return 1;

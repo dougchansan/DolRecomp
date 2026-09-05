@@ -25,8 +25,15 @@ void FunctionEmitter::emitColdEntry(BasicBlock *entryMiss) {
   builder_.CreateCondBr(builder_.CreateAnd(inRange, aligned), valid, invalid);
 
   builder_.SetInsertPoint(invalid);
-  materialize(entry_pc_);
-  returnFromBody();
+  if (modern_runtime_) {
+    builder_.CreateStore(builder_.getInt32(2),
+                         builder_.CreateStructGEP(chainType(), chain_, 7));
+    materialize(entry_pc_);
+    returnFromBody();
+  } else {
+    materialize(entry_pc_);
+    returnFromBody();
+  }
 
   builder_.SetInsertPoint(valid);
   fallback_pc_->addIncoming(entry_pc_, valid);
@@ -34,7 +41,18 @@ void FunctionEmitter::emitColdEntry(BasicBlock *entryMiss) {
 }
 
 void FunctionEmitter::emitFallbackHandler() {
+  resetFPRepresentations();
+  known_state_.fill(nullptr);
+  pending_fprf_ = nullptr;
+  fp_available_checked_ = false;
   builder_.SetInsertPoint(fallback_block_);
+  if (modern_runtime_) {
+    builder_.CreateStore(builder_.getInt32(2),
+                         builder_.CreateStructGEP(chainType(), chain_, 7));
+    materialize(fallback_pc_);
+    returnFromBody();
+    return;
+  }
   std::vector<Constant *> rawValues;
   std::vector<Constant *> cycleValues;
   rawValues.reserve(source_.block_count);
@@ -46,16 +64,16 @@ void FunctionEmitter::emitFallbackHandler() {
   }
   ArrayType *rawType =
       ArrayType::get(Type::getInt32Ty(context_), source_.block_count);
-  auto *rawTable = new GlobalVariable(
-      module_, rawType, true, GlobalValue::PrivateLinkage,
-      ConstantArray::get(rawType, rawValues),
-      std::string(source_.name) + "_fallback_raw");
+  auto *rawTable =
+      new GlobalVariable(module_, rawType, true, GlobalValue::PrivateLinkage,
+                         ConstantArray::get(rawType, rawValues),
+                         std::string(source_.name) + "_fallback_raw");
   ArrayType *cycleType =
       ArrayType::get(Type::getInt32Ty(context_), source_.block_count);
-  auto *cycleTable = new GlobalVariable(
-      module_, cycleType, true, GlobalValue::PrivateLinkage,
-      ConstantArray::get(cycleType, cycleValues),
-      std::string(source_.name) + "_fallback_cycles");
+  auto *cycleTable =
+      new GlobalVariable(module_, cycleType, true, GlobalValue::PrivateLinkage,
+                         ConstantArray::get(cycleType, cycleValues),
+                         std::string(source_.name) + "_fallback_cycles");
   Value *index = builder_.CreateZExt(
       builder_.CreateLShr(
           builder_.CreateSub(fallback_pc_,
@@ -86,8 +104,7 @@ void FunctionEmitter::emitFallbackHandler() {
       loadOffset(Type::getInt32Ty(context_), offsetof(CPUState, exception));
   BasicBlock *resume =
       BasicBlock::Create(context_, "fallback_resume", function_);
-  BasicBlock *done =
-      BasicBlock::Create(context_, "fallback_exit", function_);
+  BasicBlock *done = BasicBlock::Create(context_, "fallback_exit", function_);
   builder_.CreateCondBr(builder_.CreateICmpEQ(exception, builder_.getInt32(0)),
                         resume, done);
   builder_.SetInsertPoint(done);
@@ -104,8 +121,8 @@ void FunctionEmitter::emitFallbackHandler() {
     nativeEntries += region_leaders_[i] &&
                      source_.blocks[i].terminator.kind != DOLIR_TERM_FALLBACK;
   }
-  auto *dispatch = builder_.CreateSwitch(returnedPC, repeatCheck,
-                                         nativeEntries);
+  auto *dispatch =
+      builder_.CreateSwitch(returnedPC, repeatCheck, nativeEntries);
   for (u32 i = 0; i < source_.block_count; i++) {
     if (!region_leaders_[i] ||
         source_.blocks[i].terminator.kind == DOLIR_TERM_FALLBACK)
@@ -115,8 +132,8 @@ void FunctionEmitter::emitFallbackHandler() {
   }
 
   builder_.SetInsertPoint(repeatCheck);
-  Value *offset = builder_.CreateSub(
-      returnedPC, builder_.getInt32(source_.guest_start));
+  Value *offset =
+      builder_.CreateSub(returnedPC, builder_.getInt32(source_.guest_start));
   Value *inRange = builder_.CreateICmpULT(
       offset, builder_.getInt32(source_.guest_end - source_.guest_start));
   Value *aligned = builder_.CreateICmpEQ(
@@ -209,6 +226,10 @@ bool FunctionEmitter::emitTerminator(const DolIRTerminator &term,
     }
     return true;
   case DOLIR_TERM_SYSTEM_CALL: {
+    if (modern_runtime_) {
+      sideExit(term.guest_pc, 2);
+      return true;
+    }
     materialize(term.guest_pc);
     auto callee = module_.getOrInsertFunction(
         "ppc_system_call_exception",
@@ -221,6 +242,10 @@ bool FunctionEmitter::emitTerminator(const DolIRTerminator &term,
     return true;
   }
   case DOLIR_TERM_RFI: {
+    if (modern_runtime_) {
+      sideExit(term.guest_pc, 2);
+      return true;
+    }
     materialize(term.guest_pc);
     auto callee = module_.getOrInsertFunction(
         "ppc_rfi", FunctionType::get(Type::getVoidTy(context_),

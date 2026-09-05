@@ -27,8 +27,7 @@ bool resolveTargetProfile(const DolLLVMOptions *options, TargetProfile &result,
                           std::string &error);
 std::unique_ptr<llvm::TargetMachine>
 createTargetMachine(const TargetProfile &profile, int optimization_level,
-                    DolLLVMSemantics semantics,
-                    std::string &error);
+                    DolLLVMSemantics semantics, std::string &error);
 bool objectMatchesProfile(const char *path, const TargetProfile &profile);
 void initializeTargets();
 

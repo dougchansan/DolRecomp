@@ -181,9 +181,10 @@ static int relocation_target(const RELFile* rel, const RELModuleMap* modules,
     return section_address_at(rel, section_index, symbol_offset, target);
 }
 
-static int require_patch_range(const RELSection* section, u32 offset) {
+static int require_patch_range(const RELSection* section, u32 offset,
+                               u32 patch_size) {
     if (!section_has_file_data(section) || offset > section->size ||
-        section->size - offset < 4) {
+        section->size - offset < patch_size) {
         fprintf(stderr, "error: REL relocation patch is outside section %u\n",
                 section->index);
         return 0;
@@ -205,11 +206,13 @@ static int apply_relocation(RELSection* section, u32 offset, u32 patch_address,
     if (type == R_PPC_NONE)
         return 1;
 
-    if (!require_patch_range(section, offset))
+    const u32 patch_size = type >= R_PPC_ADDR16 && type <= R_PPC_ADDR16_HA
+                               ? 2u
+                               : 4u;
+    if (!require_patch_range(section, offset, patch_size))
         return 0;
 
     u8* patch = section->owned_data + offset;
-    u32 word = read_be32(patch);
 
     switch (type) {
     case R_PPC_ADDR32:
@@ -220,17 +223,18 @@ static int apply_relocation(RELSection* section, u32 offset, u32 patch_address,
             fprintf(stderr, "error: REL ADDR24 target is not aligned\n");
             return 0;
         }
-        write_be32(patch, (word & 0xFC000003u) | (target & 0x03FFFFFCu));
+        write_be32(patch, (read_be32(patch) & 0xFC000003u) |
+                              (target & 0x03FFFFFCu));
         return 1;
     case R_PPC_ADDR16:
     case R_PPC_ADDR16_LO:
-        write_be16(patch + 2, (u16)target);
+        write_be16(patch, (u16)target);
         return 1;
     case R_PPC_ADDR16_HI:
-        write_be16(patch + 2, (u16)(target >> 16));
+        write_be16(patch, (u16)(target >> 16));
         return 1;
     case R_PPC_ADDR16_HA:
-        write_be16(patch + 2, (u16)((target + 0x8000u) >> 16));
+        write_be16(patch, (u16)((target + 0x8000u) >> 16));
         return 1;
     case R_PPC_ADDR14:
     case R_PPC_ADDR14_BRTAKEN:
@@ -239,20 +243,23 @@ static int apply_relocation(RELSection* section, u32 offset, u32 patch_address,
             fprintf(stderr, "error: REL ADDR14 target is not aligned\n");
             return 0;
         }
-        write_be32(patch, (word & 0xFFFF0003u) | (target & 0x0000FFFCu));
+        write_be32(patch, (read_be32(patch) & 0xFFFF0003u) |
+                              (target & 0x0000FFFCu));
         return 1;
     case R_PPC_REL24: {
         s64 delta = (s64)(s32)(target - patch_address);
         if (!check_rel_delta(delta, -0x02000000ll, 0x01FFFFFCll, "REL24"))
             return 0;
-        write_be32(patch, (word & 0xFC000003u) | ((u32)delta & 0x03FFFFFCu));
+        write_be32(patch, (read_be32(patch) & 0xFC000003u) |
+                              ((u32)delta & 0x03FFFFFCu));
         return 1;
     }
     case R_PPC_REL14: {
         s64 delta = (s64)(s32)(target - patch_address);
         if (!check_rel_delta(delta, -0x8000ll, 0x7FFCll, "REL14"))
             return 0;
-        write_be32(patch, (word & 0xFFFF0003u) | ((u32)delta & 0x0000FFFCu));
+        write_be32(patch, (read_be32(patch) & 0xFFFF0003u) |
+                              ((u32)delta & 0x0000FFFCu));
         return 1;
     }
     default:
@@ -386,9 +393,17 @@ bool rel_load_image(RELFile* rel, const char* path, u32 base_address) {
     rel->prolog_offset = read_be32(h + 0x34);
     rel->epilog_offset = read_be32(h + 0x38);
     rel->unresolved_offset = read_be32(h + 0x3C);
-    u32 section_alignment = rel->file_size >= 0x44 ? read_be32(h + 0x40) : 4;
     u32 bss_alignment = rel->file_size >= 0x48 ? read_be32(h + 0x44) : 4;
+    rel->fix_size = rel->version >= 3 && rel->file_size >= 0x4C
+                        ? read_be32(h + 0x48)
+                        : rel->file_size;
     rel->base_address = base_address;
+
+    if (rel->fix_size == 0 || rel->fix_size > rel->file_size) {
+        fprintf(stderr, "error: REL fix size is outside the file\n");
+        rel_free(rel);
+        return false;
+    }
 
     if (rel->section_count == 0 ||
         rel->section_count > REL_MAX_SECTION_COUNT ||
@@ -409,7 +424,7 @@ bool rel_load_image(RELFile* rel, const char* path, u32 base_address) {
 
     int ok = 1;
     u32 bss_start;
-    if (!add_u32_checked(base_address, rel->file_size, &bss_start)) {
+    if (!add_u32_checked(base_address, rel->fix_size, &bss_start)) {
         fprintf(stderr, "error: REL BSS address overflow\n");
         rel_free(rel);
         return false;
@@ -477,13 +492,6 @@ bool rel_load_image(RELFile* rel, const char* path, u32 base_address) {
             rel_free(rel);
             return false;
         }
-        if (section_alignment > 1 && executable &&
-            (section->address % section_alignment) != 0) {
-            fprintf(stderr, "error: REL executable section %u is not aligned\n", i);
-            rel_free(rel);
-            return false;
-        }
-
         section->owned_data = (u8*)malloc(size);
         if (!section->owned_data) {
             fprintf(stderr, "error: out of memory\n");

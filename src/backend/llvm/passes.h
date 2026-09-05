@@ -7,7 +7,7 @@ namespace llvm {
 class Module;
 class TargetMachine;
 class raw_ostream;
-}
+} // namespace llvm
 
 namespace dolllvm {
 

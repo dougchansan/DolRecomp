@@ -1,4 +1,5 @@
 #include "backend/llvm/emitter.h"
+#include "backend/llvm/native_abi.h"
 
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/Function.h>
@@ -26,13 +27,19 @@ bool FunctionEmitter::emitRegion(u32 index, raw_ostream &diagnostics) {
       builder_.CreateBr(blocks_[current]);
       return true;
     }
+    const bool useService =
+        modern_runtime_ && native_abi_ && needsInterpreter(block);
     if (loop_headers_[current])
       emitBudgetGuard(block.guest_address);
     chargeCycles(block.cycle_cost);
-    values_.assign(source_.value_count, nullptr);
-    for (u32 i = 0; i < block.instruction_count; i++) {
-      if (!emitInstruction(block.instructions[i], diagnostics))
-        return false;
+    if (useService) {
+      emitInstructionService(block.guest_address);
+    } else {
+      values_.assign(source_.value_count, nullptr);
+      for (u32 i = 0; i < block.instruction_count; i++) {
+        if (!emitInstruction(block.instructions[i], diagnostics))
+          return false;
+      }
     }
     if (block.terminator.kind == DOLIR_TERM_FALLTHROUGH) {
       u32 next = block.terminator.targets[0];
@@ -233,12 +240,11 @@ bool FunctionEmitter::emitInstruction(const DolIRInstruction &inst,
          static_cast<int>((inst.aux >> 8) & 0xFFu)});
     break;
   case DOLIR_OP_GUEST_LOAD:
-    result = emitGuestLoad(inst, operand(inst, 0), resultType,
-                           inst.aux & 0xffu, (inst.aux & 0x100u) != 0);
+    result = emitGuestLoad(inst, operand(inst, 0), resultType, inst.aux & 0xffu,
+                           (inst.aux & 0x100u) != 0);
     break;
   case DOLIR_OP_GUEST_STORE:
-    emitGuestStore(inst, operand(inst, 0), operand(inst, 1),
-                   inst.aux & 0xffu);
+    emitGuestStore(inst, operand(inst, 0), operand(inst, 1), inst.aux & 0xffu);
     break;
   case DOLIR_OP_HELPER_CALL:
     if (inst.aux == DOLIR_HELPER_FP_AVAILABLE)
@@ -264,6 +270,10 @@ bool FunctionEmitter::emitInstruction(const DolIRInstruction &inst,
       result = emitSPRRead(inst);
     else if (inst.aux == DOLIR_HELPER_SPR_WRITE)
       emitSPRWrite(inst);
+    else if (inst.aux == DOLIR_HELPER_TIMEBASE_READ)
+      result = emitTimebaseRead();
+    else if (inst.aux == DOLIR_HELPER_TIMEBASE_WRITE)
+      emitTimebaseWrite(inst);
     else if (inst.aux == DOLIR_HELPER_LSWX)
       emitLSWX(inst);
     else if (inst.aux == DOLIR_HELPER_DCBZ_L ||
@@ -286,7 +296,4 @@ bool FunctionEmitter::emitInstruction(const DolIRInstruction &inst,
     values_[inst.result] = result;
   return inst.type == DOLIR_TYPE_VOID || result != nullptr;
 }
-
 } // namespace dolllvm
-
-// apologize for the spaghetti code i zombie typed this out

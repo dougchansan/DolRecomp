@@ -20,6 +20,7 @@ typedef struct {
     u32 module_id;
     u32 version;
     u32 bss_size;
+    u32 fix_size;
     u32 base_address;
     u32 entry_point;
     u32 prolog_section;

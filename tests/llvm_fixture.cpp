@@ -57,6 +57,15 @@ static bool add_chunk(DolIRModule *module, const u32 *words, u32 count,
   return result;
 }
 
+static void mark_state(u64 *mask, DolIRStateSlot slot) {
+  mask[static_cast<u32>(slot) / 64u] |= u64(1)
+                                        << (static_cast<u32>(slot) & 63u);
+}
+
+static DolIRStateSlot gpr_state(u32 reg) {
+  return static_cast<DolIRStateSlot>(DOLIR_STATE_GPR0 + reg);
+}
+
 static std::vector<unsigned char> read_file(const std::string &path) {
   FILE *file = std::fopen(path.c_str(), "rb");
   if (!file)
@@ -82,7 +91,141 @@ int main(int argc, char **argv) {
   CHECK(dolllvm_codegen_fingerprint(&fingerprintOptions, armFingerprint,
                                     sizeof(armFingerprint)));
   CHECK(std::strcmp(x86Fingerprint, armFingerprint) != 0);
-  CHECK(std::strstr(x86Fingerprint, "native-abi=2") != nullptr);
+  CHECK(std::strstr(x86Fingerprint, "native-abi=4") != nullptr);
+  CHECK(std::strstr(x86Fingerprint, "native-policy=0") != nullptr);
+
+  DolIRModule overwrittenState;
+  dolir_module_init(&overwrittenState);
+  const u32 overwritten_words[] = {0x38600001u, 0x4E800020u};
+  CHECK(add_chunk(&overwrittenState, overwritten_words, 2, 0x80000000u));
+  DolLLVMFunctionRange overwrittenRange{};
+  overwrittenRange.start = 0x80000000u;
+  overwrittenRange.end = 0x80000008u;
+  CHECK(dolllvm_analyze_function_abi(&overwrittenState.functions[0],
+                                     &overwrittenRange));
+  CHECK(!dolir_state_mask_test(
+      overwrittenRange.semantic_input_state,
+      static_cast<DolIRStateSlot>(DOLIR_STATE_GPR0 + 3)));
+  CHECK(
+      dolir_state_mask_test(overwrittenRange.may_def_state,
+                            static_cast<DolIRStateSlot>(DOLIR_STATE_GPR0 + 3)));
+  CHECK(
+      dolir_state_mask_test(overwrittenRange.must_def_state,
+                            static_cast<DolIRStateSlot>(DOLIR_STATE_GPR0 + 3)));
+  CHECK(!dolir_state_mask_test(
+      overwrittenRange.input_state,
+      static_cast<DolIRStateSlot>(DOLIR_STATE_GPR0 + 3)));
+  dolir_module_free(&overwrittenState);
+
+  DolIRModule conditionalState;
+  dolir_module_init(&conditionalState);
+  const u32 conditional_words[] = {
+      0x2C040000u,
+      0x41820008u,
+      0x38600001u,
+      0x4E800020u,
+  };
+  CHECK(add_chunk(&conditionalState, conditional_words, 4, 0x80000100u));
+  DolLLVMFunctionRange conditionalRange{};
+  conditionalRange.start = 0x80000100u;
+  conditionalRange.end = 0x80000110u;
+  CHECK(dolllvm_analyze_function_abi(&conditionalState.functions[0],
+                                     &conditionalRange));
+  CHECK(
+      dolir_state_mask_test(conditionalRange.semantic_input_state,
+                            static_cast<DolIRStateSlot>(DOLIR_STATE_GPR0 + 4)));
+  CHECK(
+      dolir_state_mask_test(conditionalRange.may_def_state,
+                            static_cast<DolIRStateSlot>(DOLIR_STATE_GPR0 + 3)));
+  CHECK(!dolir_state_mask_test(
+      conditionalRange.must_def_state,
+      static_cast<DolIRStateSlot>(DOLIR_STATE_GPR0 + 3)));
+  CHECK(
+      dolir_state_mask_test(conditionalRange.input_state,
+                            static_cast<DolIRStateSlot>(DOLIR_STATE_GPR0 + 3)));
+  dolir_module_free(&conditionalState);
+
+  DolIRInstruction callInstructions[2]{};
+  mark_state(callInstructions[0].state_defs, gpr_state(4));
+  mark_state(callInstructions[1].state_uses, gpr_state(3));
+  mark_state(callInstructions[1].state_defs, gpr_state(5));
+  DolIRBlock callBlocks[2]{};
+  callBlocks[0].instructions = &callInstructions[0];
+  callBlocks[0].instruction_count = 1;
+  callBlocks[0].terminator.kind = DOLIR_TERM_BRANCH;
+  callBlocks[0].terminator.linked = true;
+  callBlocks[0].terminator.guest_pc = 0x80000200u;
+  callBlocks[0].terminator.targets[0] = DOLIR_NO_BLOCK;
+  callBlocks[1].instructions = &callInstructions[1];
+  callBlocks[1].instruction_count = 1;
+  callBlocks[1].terminator.kind = DOLIR_TERM_RETURN;
+  DolIRFunction callFunction{};
+  callFunction.guest_start = 0x80000200u;
+  callFunction.guest_end = 0x80000208u;
+  callFunction.blocks = callBlocks;
+  callFunction.block_count = 2;
+  u64 functionOutputs[DOLIR_STATE_MASK_WORDS]{};
+  mark_state(functionOutputs, gpr_state(5));
+  mark_state(functionOutputs, gpr_state(6));
+  u64 liveAfter[DOLIR_STATE_MASK_WORDS]{};
+  u64 definedBefore[DOLIR_STATE_MASK_WORDS]{};
+  CHECK(dolllvm_analyze_callsite_state(&callFunction, 0, functionOutputs,
+                                       liveAfter, definedBefore));
+  CHECK(dolir_state_mask_test(liveAfter, gpr_state(3)));
+  CHECK(!dolir_state_mask_test(liveAfter, gpr_state(5)));
+  CHECK(dolir_state_mask_test(liveAfter, gpr_state(6)));
+  CHECK(dolir_state_mask_test(definedBefore, gpr_state(4)));
+
+  DolLLVMFunctionRange propagatedRanges[2]{};
+  propagatedRanges[0].start = 0x80000200u;
+  propagatedRanges[0].end = 0x80000208u;
+  propagatedRanges[0].abi_flags = DOLLLVM_FUNCTION_ABI_NATIVE;
+  mark_state(propagatedRanges[0].escape_state, gpr_state(7));
+  propagatedRanges[1].start = 0x80000300u;
+  propagatedRanges[1].end = 0x80000308u;
+  propagatedRanges[1].abi_flags = DOLLLVM_FUNCTION_ABI_NATIVE;
+  mark_state(propagatedRanges[1].semantic_input_state, gpr_state(4));
+  mark_state(propagatedRanges[1].semantic_input_state, gpr_state(5));
+  mark_state(propagatedRanges[1].input_state, gpr_state(4));
+  mark_state(propagatedRanges[1].input_state, gpr_state(5));
+  mark_state(propagatedRanges[1].may_def_state, gpr_state(3));
+  mark_state(propagatedRanges[1].may_def_state, gpr_state(6));
+  mark_state(propagatedRanges[1].output_state, gpr_state(3));
+  mark_state(propagatedRanges[1].output_state, gpr_state(6));
+  DolLLVMCallEdge propagatedEdge{};
+  propagatedEdge.caller_start = 0x80000200u;
+  propagatedEdge.callee_address = 0x80000300u;
+  mark_state(propagatedEdge.live_after, gpr_state(3));
+  mark_state(propagatedEdge.defined_before, gpr_state(4));
+  CHECK(
+      dolllvm_propagate_function_abis(propagatedRanges, 2, &propagatedEdge, 1));
+  CHECK(!dolir_state_mask_test(propagatedRanges[0].semantic_input_state,
+                               gpr_state(4)));
+  CHECK(dolir_state_mask_test(propagatedRanges[0].semantic_input_state,
+                              gpr_state(5)));
+  CHECK(dolir_state_mask_test(propagatedRanges[1].semantic_output_state,
+                              gpr_state(3)));
+  CHECK(!dolir_state_mask_test(propagatedRanges[1].semantic_output_state,
+                               gpr_state(6)));
+  CHECK(dolir_state_mask_test(propagatedRanges[1].escape_state, gpr_state(7)));
+  CHECK(propagatedRanges[0].native_call_targets == 1u);
+  CHECK(propagatedRanges[0].native_call_depth == 2u);
+
+  DolLLVMFunctionRange policyRanges[2]{};
+  for (DolLLVMFunctionRange &range : policyRanges)
+    range.abi_flags = DOLLLVM_FUNCTION_ABI_NATIVE;
+  for (u32 slot = 0; slot < 4; slot++)
+    mark_state(policyRanges[0].input_state, static_cast<DolIRStateSlot>(slot));
+  mark_state(policyRanges[0].output_state, DOLIR_STATE_GPR0);
+  for (u32 slot = 0; slot < 5; slot++)
+    mark_state(policyRanges[1].input_state, static_cast<DolIRStateSlot>(slot));
+  mark_state(policyRanges[1].output_state, DOLIR_STATE_GPR0);
+  dolllvm_apply_native_abi_policy(policyRanges, 2, DOLLLVM_NATIVE_ABI_COMPACT);
+  CHECK(policyRanges[0].abi_flags & DOLLLVM_FUNCTION_ABI_NATIVE);
+  CHECK(!(policyRanges[1].abi_flags & DOLLLVM_FUNCTION_ABI_NATIVE));
+  dolllvm_apply_native_abi_policy(policyRanges, 2, DOLLLVM_NATIVE_ABI_DISABLED);
+  CHECK(!(policyRanges[0].abi_flags & DOLLLVM_FUNCTION_ABI_NATIVE));
+
   DolIRModule module;
   dolir_module_init(&module);
 
@@ -359,11 +502,7 @@ int main(int argc, char **argv) {
   // Both indirect returns can dispatch to the linked branch's fallback
   // continuation. The mtctr/bctr path also carries modified state into it.
   const u32 indirect_fallback_words[] = {
-      branch(true, 0x10u),
-      0x00000000u,
-      mtspr(3, 9),
-      0x4E800420u,
-      0x4E800020u,
+      branch(true, 0x10u), 0x00000000u, mtspr(3, 9), 0x4E800420u, 0x4E800020u,
   };
   CHECK(add_chunk(&module, indirect_fallback_words, 5, 0x80003D00u));
 
@@ -372,6 +511,34 @@ int main(int argc, char **argv) {
       0x4E800020u,
   };
   CHECK(add_chunk(&module, mtmsr_words, 2, 0x80003D20u));
+
+  const u32 timebase_words[] = {
+      0x7C6C42E6u,
+      0x7C8D42E6u,
+      0x4E800020u,
+  };
+  CHECK(add_chunk(&module, timebase_words, 3, 0x80003D30u));
+
+  const u32 wide_return_words[] = {
+      0x38630001u, 0x38840001u, 0x38A50001u, 0x38C60001u,
+      0x38E70001u, 0x39080001u, 0x4E800020u,
+  };
+  CHECK(add_chunk(&module, wide_return_words, 7, 0x80003D40u));
+
+  const u32 resume_words[] = {
+      0x48000008u,
+      0x4E800020u,
+      0x38C0000Du,
+      0x4E800020u,
+  };
+  CHECK(add_chunk(&module, resume_words, 4, 0x80003D60u));
+
+  const u32 exact_fallback_words[] = {
+      0xFC070040u,
+      0x38630001u,
+      0x4E800020u,
+  };
+  CHECK(add_chunk(&module, exact_fallback_words, 3, 0x80003D80u));
 
   CHECK(dolir_verify(&module, stderr));
   DolLLVMOptions options{};
@@ -382,15 +549,19 @@ int main(int argc, char **argv) {
   options.fixed_memory_layout = 1;
   options.ram_size = GC_MAIN_RAM_SIZE;
   options.mem2_size = WII_MEM2_SIZE;
-  DolLLVMFunctionRange ranges[8]{};
-  const u32 range_bounds[8][2] = {
-      {0x80002D00u, 0x80002D04u}, {0x80002E00u, 0x80002E04u},
-      {0x80003300u, 0x80003310u},
+  DolLLVMFunctionRange ranges[16]{};
+  const u32 range_bounds[16][2] = {
+      {0x80002400u, 0x80002408u}, {0x80002600u, 0x80002604u},
+      {0x80002700u, 0x80002704u}, {0x80002D00u, 0x80002D04u},
+      {0x80002E00u, 0x80002E04u}, {0x80003300u, 0x80003310u},
       {0x80003500u, 0x80003514u}, {0x80003600u, 0x80003608u},
       {0x80003B00u, 0x80003B08u}, {0x80003B08u, 0x80003B14u},
-      {0x80003C00u, 0x80003C08u},
+      {0x80003C00u, 0x80003C08u}, {0x80003D20u, 0x80003D28u},
+      {0x80003D30u, 0x80003D3Cu}, {0x80003D40u, 0x80003D5Cu},
+      {0x80003D60u, 0x80003D70u}, {0x80003D80u, 0x80003D8Cu},
   };
-  for (u32 index = 0; index < 8; index++) {
+  for (u32 index = 0; index < sizeof(range_bounds) / sizeof(range_bounds[0]);
+       index++) {
     ranges[index].start = range_bounds[index][0];
     ranges[index].end = range_bounds[index][1];
   }
@@ -398,6 +569,26 @@ int main(int argc, char **argv) {
   options.function_range_count = (u32)(sizeof(ranges) / sizeof(ranges[0]));
   CHECK(dolllvm_emit_object(&module, argv[1], &options, stderr));
   CHECK(dolllvm_object_matches_options(argv[1], &options));
+
+  const std::string nativeObject = std::string(argv[1]) + ".native";
+  const std::string nativeIR = std::string(argv[2]) + ".native";
+  options.runtime = DOLLLVM_RUNTIME_MODERNGEKKO;
+  options.ir_path = nativeIR.c_str();
+  CHECK(dolllvm_emit_object(&module, nativeObject.c_str(), &options, stderr));
+  options.runtime = DOLLLVM_RUNTIME_RECOMPCORE;
+  options.ir_path = argv[2];
+
+  const std::string compactObject = std::string(argv[1]) + ".compact";
+  const std::string contextObject = std::string(argv[1]) + ".context";
+  options.emit_ir = 0;
+  options.ir_path = nullptr;
+  options.native_abi_policy = DOLLLVM_NATIVE_ABI_COMPACT;
+  CHECK(dolllvm_emit_object(&module, compactObject.c_str(), &options, stderr));
+  options.native_abi_policy = DOLLLVM_NATIVE_ABI_DISABLED;
+  CHECK(dolllvm_emit_object(&module, contextObject.c_str(), &options, stderr));
+  options.native_abi_policy = DOLLLVM_NATIVE_ABI_UNRESTRICTED;
+  options.emit_ir = 1;
+  options.ir_path = argv[2];
 
   const std::string memoryStateObject = std::string(argv[1]) + ".state-memory";
   const std::string memoryStateIR = std::string(argv[2]) + ".state-memory";
@@ -420,7 +611,10 @@ int main(int argc, char **argv) {
       mfspr(0, 8), 0x480000FDu, mtspr(0, 8), 0x38A50001u, 0x4E800020u,
   };
   const u32 split_memory_callee_words[] = {
-      0x3C808000u, 0x80640600u, 0x90640604u, 0x4E800020u,
+      0x3C808000u,
+      0x80640600u,
+      0x90640604u,
+      0x4E800020u,
   };
   CHECK(add_chunk(&splitCaller, split_caller_words, 5, 0x80004000u));
   CHECK(add_chunk(&splitCallee, split_callee_words, 2, 0x80004100u));
@@ -443,12 +637,12 @@ int main(int argc, char **argv) {
       dolllvm_analyze_function_abi(&splitCaller.functions[1], &splitRanges[2]));
   CHECK(
       dolllvm_analyze_function_abi(&splitCallee.functions[1], &splitRanges[3]));
-  CHECK((splitRanges[3].abi_flags &
-         DOLLLVM_FUNCTION_ABI_NATIVE_MEMORY) != 0);
-  const DolLLVMCallEdge splitEdges[] = {
-      {0x80004000u, 0x80004100u},
-      {0x80004500u, 0x80004600u},
-  };
+  CHECK((splitRanges[3].abi_flags & DOLLLVM_FUNCTION_ABI_NATIVE_MEMORY) != 0);
+  DolLLVMCallEdge splitEdges[2]{};
+  splitEdges[0].caller_start = 0x80004000u;
+  splitEdges[0].callee_address = 0x80004100u;
+  splitEdges[1].caller_start = 0x80004500u;
+  splitEdges[1].callee_address = 0x80004600u;
   CHECK(dolllvm_propagate_function_abis(splitRanges, 4, splitEdges, 2));
   DolLLVMOptions splitOptions{};
   splitOptions.optimization_level = 2;
@@ -469,6 +663,21 @@ int main(int argc, char **argv) {
   splitOptions.ir_path = nullptr;
   CHECK(dolllvm_emit_object(&splitCallee, splitCalleeObject.c_str(),
                             &splitOptions, stderr));
+  splitOptions.native_abi_policy = DOLLLVM_NATIVE_ABI_COMPACT;
+  const std::string splitCallerCompact = splitCallerObject + ".compact";
+  const std::string splitCalleeCompact = splitCalleeObject + ".compact";
+  CHECK(dolllvm_emit_object(&splitCaller, splitCallerCompact.c_str(),
+                            &splitOptions, stderr));
+  CHECK(dolllvm_emit_object(&splitCallee, splitCalleeCompact.c_str(),
+                            &splitOptions, stderr));
+  splitOptions.native_abi_policy = DOLLLVM_NATIVE_ABI_DISABLED;
+  const std::string splitCallerContext = splitCallerObject + ".context";
+  const std::string splitCalleeContext = splitCalleeObject + ".context";
+  CHECK(dolllvm_emit_object(&splitCaller, splitCallerContext.c_str(),
+                            &splitOptions, stderr));
+  CHECK(dolllvm_emit_object(&splitCallee, splitCalleeContext.c_str(),
+                            &splitOptions, stderr));
+  splitOptions.native_abi_policy = DOLLLVM_NATIVE_ABI_UNRESTRICTED;
   dolir_module_free(&splitCaller);
   dolir_module_free(&splitCallee);
 
@@ -489,7 +698,9 @@ int main(int argc, char **argv) {
   loopRanges[1].end = 0x80004308u;
   CHECK(dolllvm_analyze_function_abi(&loopCaller.functions[0], &loopRanges[0]));
   CHECK(dolllvm_analyze_function_abi(&loopCallee.functions[0], &loopRanges[1]));
-  const DolLLVMCallEdge loopEdge = {0x80004200u, 0x80004300u};
+  DolLLVMCallEdge loopEdge{};
+  loopEdge.caller_start = 0x80004200u;
+  loopEdge.callee_address = 0x80004300u;
   CHECK(dolllvm_propagate_function_abis(loopRanges, 2, &loopEdge, 1));
   splitOptions.function_ranges = loopRanges;
   const std::string loopCallerObject =
@@ -500,6 +711,21 @@ int main(int argc, char **argv) {
                             &splitOptions, stderr));
   CHECK(dolllvm_emit_object(&loopCallee, loopCalleeObject.c_str(),
                             &splitOptions, stderr));
+  splitOptions.native_abi_policy = DOLLLVM_NATIVE_ABI_COMPACT;
+  const std::string loopCallerCompact = loopCallerObject + ".compact";
+  const std::string loopCalleeCompact = loopCalleeObject + ".compact";
+  CHECK(dolllvm_emit_object(&loopCaller, loopCallerCompact.c_str(),
+                            &splitOptions, stderr));
+  CHECK(dolllvm_emit_object(&loopCallee, loopCalleeCompact.c_str(),
+                            &splitOptions, stderr));
+  splitOptions.native_abi_policy = DOLLLVM_NATIVE_ABI_DISABLED;
+  const std::string loopCallerContext = loopCallerObject + ".context";
+  const std::string loopCalleeContext = loopCalleeObject + ".context";
+  CHECK(dolllvm_emit_object(&loopCaller, loopCallerContext.c_str(),
+                            &splitOptions, stderr));
+  CHECK(dolllvm_emit_object(&loopCallee, loopCalleeContext.c_str(),
+                            &splitOptions, stderr));
+  splitOptions.native_abi_policy = DOLLLVM_NATIVE_ABI_UNRESTRICTED;
   dolir_module_free(&loopCaller);
   dolir_module_free(&loopCallee);
 

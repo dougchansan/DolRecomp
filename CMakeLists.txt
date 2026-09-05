@@ -105,13 +105,23 @@ if(DOLRECOMP_ENABLE_LLVM)
         src/backend/llvm/control_flow.cpp
         src/backend/llvm/emitter.cpp
         src/backend/llvm/native_wrapper.cpp
+        src/backend/llvm/modern_wrapper.cpp
         src/backend/llvm/native_abi.cpp
+        src/backend/llvm/abi_liveness.cpp
+        src/backend/llvm/abi_policy.cpp
+        src/backend/llvm/call_liveness.cpp
         src/backend/llvm/abi_stats.cpp
+        src/backend/llvm/cache_control.cpp
+        src/backend/llvm/instruction_service.cpp
         src/backend/llvm/memory.cpp
+        src/backend/llvm/memory_service.cpp
         src/backend/llvm/memory_fallback.cpp
         src/backend/llvm/register_state.cpp
+        src/backend/llvm/state_access.cpp
+        src/backend/llvm/state_write.cpp
         src/backend/llvm/state_controls.cpp
         src/backend/llvm/exits.cpp
+        src/backend/llvm/timing.cpp
         src/backend/llvm/native_exits.cpp
         src/backend/llvm/instructions.cpp
         src/backend/llvm/runtime.cpp
@@ -122,6 +132,7 @@ if(DOLRECOMP_ENABLE_LLVM)
         src/backend/llvm/paired_fma.cpp
         src/backend/llvm/psq_convert.cpp
         src/backend/llvm/psq.cpp
+        src/backend/llvm/psq_load.cpp
         src/backend/llvm/psq_static.cpp
         src/backend/llvm/special_instructions.cpp
     )
@@ -194,6 +205,8 @@ add_library(dr_backend STATIC
     src/backend/emitter.c
     src/backend/dispatch.c
     src/backend/codegen.c
+    src/backend/native_state.c
+    src/backend/native_module.c
     src/backend/symbols.c
     src/backend/module_abi.c
     src/backend/variant_output.c
@@ -226,6 +239,8 @@ file(GLOB DOLRECOMP_CODEGEN_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ir/*.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ir/*.h")
 list(SORT DOLRECOMP_CODEGEN_SOURCES)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    ${DOLRECOMP_CODEGEN_SOURCES})
 set(DOLRECOMP_CODEGEN_DIGEST "")
 foreach(_codegen_source IN LISTS DOLRECOMP_CODEGEN_SOURCES)
     file(SHA256 "${_codegen_source}" _codegen_file_hash)
@@ -384,6 +399,14 @@ if(DOLRECOMP_ENABLE_LLVM)
              ${CMAKE_CURRENT_BINARY_DIR}/dolir_test.ll.a57
              ${CMAKE_CURRENT_BINARY_DIR}/dolir_test.ll.state-memory)
     set_tests_properties(llvm_ir PROPERTIES DEPENDS llvm_fixture)
+    add_executable(modern_codegen_test tests/modern_codegen_test.cpp)
+    target_include_directories(modern_codegen_test SYSTEM PRIVATE
+        ${LLVM_INCLUDE_DIRS})
+    target_compile_definitions(modern_codegen_test PRIVATE ${LLVM_DEFINITIONS})
+    target_link_libraries(modern_codegen_test PRIVATE dr_llvm)
+    add_test(NAME modern_codegen COMMAND modern_codegen_test
+             ${CMAKE_CURRENT_BINARY_DIR}/dolir_test.ll.native)
+    set_tests_properties(modern_codegen PROPERTIES DEPENDS llvm_fixture)
     set(DOLRECOMP_TEST_OBJECT ${CMAKE_CURRENT_BINARY_DIR}/dolir_execute.o)
     set(DOLRECOMP_TEST_IR ${CMAKE_CURRENT_BINARY_DIR}/dolir_execute.ll)
     set(DOLRECOMP_ABI_CALLER_OBJECT
@@ -394,6 +417,8 @@ if(DOLRECOMP_ENABLE_LLVM)
         ${CMAKE_CURRENT_BINARY_DIR}/dolir_execute.o.abi.loop.caller)
     set(DOLRECOMP_ABI_LOOP_CALLEE_OBJECT
         ${CMAKE_CURRENT_BINARY_DIR}/dolir_execute.o.abi.loop.callee)
+    set(DOLRECOMP_COMPACT_OBJECT ${DOLRECOMP_TEST_OBJECT}.compact)
+    set(DOLRECOMP_CONTEXT_OBJECT ${DOLRECOMP_TEST_OBJECT}.context)
     add_custom_command(
         OUTPUT ${DOLRECOMP_TEST_OBJECT} ${DOLRECOMP_TEST_IR}
         BYPRODUCTS
@@ -418,6 +443,18 @@ if(DOLRECOMP_ENABLE_LLVM)
             ${DOLRECOMP_TEST_IR}.abi.caller
             ${DOLRECOMP_TEST_OBJECT}.state-memory
             ${DOLRECOMP_TEST_IR}.state-memory
+            ${DOLRECOMP_TEST_OBJECT}.native
+            ${DOLRECOMP_TEST_IR}.native
+            ${DOLRECOMP_COMPACT_OBJECT}
+            ${DOLRECOMP_CONTEXT_OBJECT}
+            ${DOLRECOMP_ABI_CALLER_OBJECT}.compact
+            ${DOLRECOMP_ABI_CALLEE_OBJECT}.compact
+            ${DOLRECOMP_ABI_LOOP_CALLER_OBJECT}.compact
+            ${DOLRECOMP_ABI_LOOP_CALLEE_OBJECT}.compact
+            ${DOLRECOMP_ABI_CALLER_OBJECT}.context
+            ${DOLRECOMP_ABI_CALLEE_OBJECT}.context
+            ${DOLRECOMP_ABI_LOOP_CALLER_OBJECT}.context
+            ${DOLRECOMP_ABI_LOOP_CALLEE_OBJECT}.context
         COMMAND llvm_fixture ${DOLRECOMP_TEST_OBJECT} ${DOLRECOMP_TEST_IR}
         DEPENDS llvm_fixture
         VERBATIM
@@ -429,6 +466,16 @@ if(DOLRECOMP_ENABLE_LLVM)
         ${DOLRECOMP_ABI_CALLEE_OBJECT}
         ${DOLRECOMP_ABI_LOOP_CALLER_OBJECT}
         ${DOLRECOMP_ABI_LOOP_CALLEE_OBJECT}
+        ${DOLRECOMP_COMPACT_OBJECT}
+        ${DOLRECOMP_CONTEXT_OBJECT}
+        ${DOLRECOMP_ABI_CALLER_OBJECT}.compact
+        ${DOLRECOMP_ABI_CALLEE_OBJECT}.compact
+        ${DOLRECOMP_ABI_LOOP_CALLER_OBJECT}.compact
+        ${DOLRECOMP_ABI_LOOP_CALLEE_OBJECT}.compact
+        ${DOLRECOMP_ABI_CALLER_OBJECT}.context
+        ${DOLRECOMP_ABI_CALLEE_OBJECT}.context
+        ${DOLRECOMP_ABI_LOOP_CALLER_OBJECT}.context
+        ${DOLRECOMP_ABI_LOOP_CALLEE_OBJECT}.context
         PROPERTIES GENERATED TRUE EXTERNAL_OBJECT TRUE)
     add_executable(llvm_smoke_test tests/llvm_smoke_test.c ${DOLRECOMP_TEST_OBJECT})
     target_link_libraries(llvm_smoke_test PRIVATE dr_cpu)
@@ -447,6 +494,18 @@ if(DOLRECOMP_ENABLE_LLVM)
         ${DOLRECOMP_ABI_CALLEE_OBJECT})
     target_link_libraries(llvm_abi_execute_test PRIVATE dr_cpu)
     add_test(NAME llvm_abi_execute COMMAND llvm_abi_execute_test)
+    add_executable(llvm_abi_execute_compact_test
+        tests/llvm_abi_execute_test.c
+        ${DOLRECOMP_ABI_CALLER_OBJECT}.compact
+        ${DOLRECOMP_ABI_CALLEE_OBJECT}.compact)
+    target_link_libraries(llvm_abi_execute_compact_test PRIVATE dr_cpu)
+    add_test(NAME llvm_abi_execute_compact COMMAND llvm_abi_execute_compact_test)
+    add_executable(llvm_abi_execute_context_test
+        tests/llvm_abi_execute_test.c
+        ${DOLRECOMP_ABI_CALLER_OBJECT}.context
+        ${DOLRECOMP_ABI_CALLEE_OBJECT}.context)
+    target_link_libraries(llvm_abi_execute_context_test PRIVATE dr_cpu)
+    add_test(NAME llvm_abi_execute_context COMMAND llvm_abi_execute_context_test)
     add_executable(paired_single_test
         tests/paired_single_test.c ${DOLRECOMP_TEST_OBJECT})
     target_link_libraries(paired_single_test PRIVATE dr_cpu)
@@ -459,6 +518,22 @@ if(DOLRECOMP_ENABLE_LLVM)
         ${DOLRECOMP_ABI_LOOP_CALLER_OBJECT}
         ${DOLRECOMP_ABI_LOOP_CALLEE_OBJECT})
     target_link_libraries(llvm_backend_bench PRIVATE dr_cpu)
+    add_executable(llvm_backend_bench_compact
+        benchmarks/llvm_backend_bench.c
+        ${DOLRECOMP_COMPACT_OBJECT}
+        ${DOLRECOMP_ABI_CALLER_OBJECT}.compact
+        ${DOLRECOMP_ABI_CALLEE_OBJECT}.compact
+        ${DOLRECOMP_ABI_LOOP_CALLER_OBJECT}.compact
+        ${DOLRECOMP_ABI_LOOP_CALLEE_OBJECT}.compact)
+    target_link_libraries(llvm_backend_bench_compact PRIVATE dr_cpu)
+    add_executable(llvm_backend_bench_context
+        benchmarks/llvm_backend_bench.c
+        ${DOLRECOMP_CONTEXT_OBJECT}
+        ${DOLRECOMP_ABI_CALLER_OBJECT}.context
+        ${DOLRECOMP_ABI_CALLEE_OBJECT}.context
+        ${DOLRECOMP_ABI_LOOP_CALLER_OBJECT}.context
+        ${DOLRECOMP_ABI_LOOP_CALLEE_OBJECT}.context)
+    target_link_libraries(llvm_backend_bench_context PRIVATE dr_cpu)
     find_program(DOLRECOMP_LLVM_OBJDUMP
         NAMES llvm-objdump-${LLVM_VERSION_MAJOR} llvm-objdump
         HINTS ${LLVM_TOOLS_BINARY_DIR})

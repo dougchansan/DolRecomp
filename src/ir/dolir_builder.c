@@ -320,8 +320,9 @@ u32 dolir_instruction_cycle_cost(const PPCInst* inst) {
     if (inst->embedded_data)
         return 0;
     switch (inst->op) {
-    case PPC_OP_UNKNOWN: case PPC_OP_DCBST: case PPC_OP_DCBF:
-    case PPC_OP_DCBI: case PPC_OP_ICBI: return 0;
+    case PPC_OP_UNKNOWN: return 0;
+    case PPC_OP_DCBST: case PPC_OP_DCBF: case PPC_OP_DCBI: return 5;
+    case PPC_OP_ICBI: return 4;
     case PPC_OP_MULLI: return 3;
     case PPC_OP_SC: case PPC_OP_RFI: case PPC_OP_TW: return 2;
     case PPC_OP_LMW: case PPC_OP_STMW: return 11;
@@ -1238,7 +1239,10 @@ static bool lower_state(Builder* b) {
             return true;
         }
         if (i->spr == 284 || i->spr == 285) {
-            DolIRValue old = read_slot(b, DOLIR_STATE_TIMEBASE);
+            DolIRValue old = dolir_append(b->function, b->block,
+                DOLIR_OP_HELPER_CALL, DOLIR_TYPE_I64, NULL, 0, 0,
+                DOLIR_HELPER_TIMEBASE_READ, i->address,
+                DOLIR_EFFECT_READ_STATE);
             DolIRValue value = zext_value(b, DOLIR_TYPE_I64, gpr(b, i->rS));
             if (i->spr == 284) {
                 old = binary(b, DOLIR_OP_AND, DOLIR_TYPE_I64, old,
@@ -1249,8 +1253,12 @@ static bool lower_state(Builder* b) {
                 value = binary(b, DOLIR_OP_SHL, DOLIR_TYPE_I64,
                                value, c64(b, 32));
             }
-            write_slot(b, DOLIR_STATE_TIMEBASE,
-                       binary(b, DOLIR_OP_OR, DOLIR_TYPE_I64, old, value));
+            value = binary(b, DOLIR_OP_OR, DOLIR_TYPE_I64, old, value);
+            dolir_append(b->function, b->block, DOLIR_OP_HELPER_CALL,
+                         DOLIR_TYPE_VOID, &value, 1, 0,
+                         DOLIR_HELPER_TIMEBASE_WRITE, i->address,
+                         DOLIR_EFFECT_WRITE_STATE | DOLIR_EFFECT_MAY_EXIT |
+                         DOLIR_EFFECT_BARRIER);
             return true;
         }
         DolIRStateSlot slot;
@@ -1323,7 +1331,10 @@ static bool lower_state(Builder* b) {
             set_gpr(b, i->rD, value);
             return true;
         }
-        DolIRValue timebase = read_slot(b, DOLIR_STATE_TIMEBASE);
+        DolIRValue timebase = dolir_append(b->function, b->block,
+            DOLIR_OP_HELPER_CALL, DOLIR_TYPE_I64, NULL, 0, 0,
+            DOLIR_HELPER_TIMEBASE_READ, i->address,
+            DOLIR_EFFECT_READ_STATE);
         if (i->spr == 269)
             timebase = binary(b, DOLIR_OP_LSHR, DOLIR_TYPE_I64,
                               timebase, c64(b, 32));

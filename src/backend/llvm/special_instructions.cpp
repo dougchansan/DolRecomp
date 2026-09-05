@@ -20,12 +20,14 @@ void FunctionEmitter::emitStateWrite(const DolIRInstruction &inst) {
     return;
   }
 
-  Value *old = builder_.CreateLoad(Type::getInt32Ty(context_), state_[inst.aux]);
+  Value *old =
+      builder_.CreateLoad(Type::getInt32Ty(context_), state_[inst.aux]);
   builder_.CreateStore(value, state_[inst.aux]);
   noteStateWrite(slot, value);
   Value *enabled = builder_.CreateAnd(builder_.CreateNot(old), value);
-  enabled = builder_.CreateICmpNE(builder_.CreateAnd(enabled, builder_.getInt32(0x8000)),
-                                  builder_.getInt32(0));
+  enabled = builder_.CreateICmpNE(
+      builder_.CreateAnd(enabled, builder_.getInt32(0x8000)),
+      builder_.getInt32(0));
   BasicBlock *exit = BasicBlock::Create(context_, "msr_ee_exit", function_);
   BasicBlock *resume = BasicBlock::Create(context_, "msr_ee_resume", function_);
   builder_.CreateCondBr(enabled, exit, resume);
@@ -74,6 +76,16 @@ Value *FunctionEmitter::emitFPAvailable(u32 pc) {
   BasicBlock *cold = BasicBlock::Create(context_, "fp_check", function_);
   builder_.CreateCondBr(enabled, good, cold);
   builder_.SetInsertPoint(cold);
+  if (modern_runtime_) {
+    Value *exceptions = builder_.CreateLoad(Type::getInt32Ty(context_),
+                                            state_[DOLIR_STATE_EXCEPTION]);
+    builder_.CreateStore(builder_.CreateOr(exceptions, builder_.getInt32(0x40)),
+                         state_[DOLIR_STATE_EXCEPTION]);
+    sideExit(pc, 1);
+    builder_.SetInsertPoint(good);
+    fp_available_checked_ = true;
+    return ConstantInt::getTrue(context_);
+  }
   materialize(pc);
   auto callee = module_.getOrInsertFunction(
       "ppc_fp_available", FunctionType::get(Type::getInt1Ty(context_),

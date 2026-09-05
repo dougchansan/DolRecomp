@@ -37,8 +37,8 @@ bool optimizeModule(Module &module, TargetMachine &machine,
     pgo.emplace(options.profile_generate_path, "", "", "",
                 vfs::getRealFileSystem(), PGOOptions::IRInstr);
   } else if (options.profile_use_path && options.profile_use_path[0]) {
-    pgo.emplace(options.profile_use_path, "", "", "",
-                vfs::getRealFileSystem(), PGOOptions::IRUse);
+    pgo.emplace(options.profile_use_path, "", "", "", vfs::getRealFileSystem(),
+                PGOOptions::IRUse);
   }
   PassBuilder builder(&machine, tuning, pgo);
   builder.registerModuleAnalyses(modules);
@@ -46,9 +46,8 @@ bool optimizeModule(Module &module, TargetMachine &machine,
   builder.registerFunctionAnalyses(functions);
   builder.registerLoopAnalyses(loops);
   builder.crossRegisterProxies(loops, functions, call_graph, modules);
-  ModulePassManager pipeline =
-      builder.buildPerModuleDefaultPipeline(
-          optimizationLevel(options.optimization_level));
+  ModulePassManager pipeline = builder.buildPerModuleDefaultPipeline(
+      optimizationLevel(options.optimization_level));
   pipeline.run(module, modules);
   return true;
 }

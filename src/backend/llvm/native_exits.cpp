@@ -144,7 +144,7 @@ Value *FunctionEmitter::nativeOutputValue(Value *result,
       Type *stateTy = type(dolir_state_type(stateSlot));
       if (stateTy->isDoubleTy())
         return builder_.CreateBitCast(value, stateTy);
-      return builder_.CreateTrunc(value, stateTy);
+      return builder_.CreateZExtOrTrunc(value, stateTy);
     }
     offset += width;
     if (offset == 64) {

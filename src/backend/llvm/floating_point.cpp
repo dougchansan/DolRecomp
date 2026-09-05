@@ -11,7 +11,6 @@ namespace dolllvm {
 
 using namespace llvm;
 
-
 void FunctionEmitter::emitExactFloat(u64 descriptor) {
   auto op = static_cast<DolIRExactFloat>(descriptor & 0xFFu);
   u32 d = (descriptor >> 8) & 0xFFu;
@@ -180,10 +179,9 @@ void FunctionEmitter::emitExactFloat(u64 descriptor) {
     }
   }
   reloadState(DOLIR_STATE_FPSCR);
-  bool singleResult =
-      (op >= DOLIR_EXACT_FADDS && op <= DOLIR_EXACT_FDIVS) ||
-      op == DOLIR_EXACT_FRSP ||
-      (op >= DOLIR_EXACT_FMADDS && op <= DOLIR_EXACT_FNMSUBS);
+  bool singleResult = (op >= DOLIR_EXACT_FADDS && op <= DOLIR_EXACT_FDIVS) ||
+                      op == DOLIR_EXACT_FRSP ||
+                      (op >= DOLIR_EXACT_FMADDS && op <= DOLIR_EXACT_FNMSUBS);
   if (singleResult) {
     Value *single = builder_.CreateFPTrunc(
         pairF64(d), FixedVectorType::get(Type::getFloatTy(context_), 2));
@@ -193,6 +191,5 @@ void FunctionEmitter::emitExactFloat(u64 descriptor) {
     fp_denormal_safe_[d] = true;
   }
 }
-
 
 } // namespace dolllvm

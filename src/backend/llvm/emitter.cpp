@@ -32,12 +32,13 @@ FunctionEmitter::FunctionEmitter(LLVMContext &context, Module &module,
       symbol_suffix_(options.symbol_suffix ? options.symbol_suffix : ""),
       fixed_memory_layout_(options.fixed_memory_layout != 0),
       state_in_memory_(options.state_in_memory != 0),
+      modern_runtime_(options.runtime == DOLLLVM_RUNTIME_MODERNGEKKO),
       expected_ram_size_(options.ram_size),
       expected_mem2_size_(options.mem2_size) {
   const Triple triple(module_.getTargetTriple());
-  intrinsic_escapes_ = triple.isX86();
-  cold_escapes_ =
-      intrinsic_escapes_ || (triple.isAArch64() && !triple.isOSWindows());
+  intrinsic_escapes_ = triple.isX86() && !modern_runtime_;
+  cold_escapes_ = modern_runtime_ || intrinsic_escapes_ ||
+                  (triple.isAArch64() && !triple.isOSWindows());
   for (u32 index = 0; index < range_count_; index++) {
     if (ranges_[index].start != source_.guest_start)
       continue;
@@ -48,6 +49,8 @@ FunctionEmitter::FunctionEmitter(LLVMContext &context, Module &module,
 }
 
 bool FunctionEmitter::emit(raw_ostream &diagnostics) {
+  if (modern_runtime_ && !native_abi_)
+    return true;
   auto *type = bodyFunctionType(abi_range_);
   const std::string bodyName =
       symbolName(std::string(source_.name) + "_budget");
@@ -62,18 +65,25 @@ bool FunctionEmitter::emit(raw_ostream &diagnostics) {
   function_->setCallingConv(bodyCallingConvention());
   function_->setVisibility(GlobalValue::HiddenVisibility);
   function_->setDSOLocal(true);
-  ctx_ = function_->getArg(0);
+  u32 fixedArgument = 0;
+  ctx_ = function_->getArg(fixedArgument++);
   ctx_->setName("ctx");
   ctx_->addAttr(Attribute::NonNull);
   ctx_->addAttr(Attribute::NoAlias);
-  ctx_->addAttr(
-      Attribute::getWithDereferenceableBytes(context_, sizeof(CPUState)));
-  chain_ = function_->getArg(1);
+  if (!modern_runtime_)
+    ctx_->addAttr(
+        Attribute::getWithDereferenceableBytes(context_, sizeof(CPUState)));
+  if (modern_runtime_) {
+    state_interface_ = function_->getArg(fixedArgument++);
+    state_interface_->setName("state_interface");
+    state_interface_->addAttr(Attribute::NonNull);
+  }
+  chain_ = function_->getArg(fixedArgument++);
   chain_->setName("chain");
-  control_pc_ = function_->getArg(2);
+  control_pc_ = function_->getArg(fixedArgument++);
   control_pc_->setName("control_pc");
   if (native_abi_) {
-    u32 argument = 3;
+    u32 argument = fixedArgument;
     if (nativeCyclesInResult(abi_range_)) {
       initial_cycles_ = function_->getArg(argument++);
       initial_cycles_->setName("initial_cycles");

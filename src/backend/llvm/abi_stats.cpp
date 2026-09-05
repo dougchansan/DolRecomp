@@ -131,15 +131,32 @@ extern "C" void dolllvm_report_abi_stats(const DolLLVMFunctionRange *ranges,
   u32 sretFunctions = 0;
   u32 cycleMemoryFunctions = 0;
   u32 nativeMemoryFunctions = 0;
+  u32 compactFunctions = 0;
+  u64 boundaryLoads = 0;
+  u64 boundaryStores = 0;
+  u64 directMemoryAccesses = 0;
+  u64 genericMemoryAccesses = 0;
+  u64 helperCalls = 0;
+  u64 nativeCallEdges = 0;
+  u32 nativeCallDepth = 0;
+  std::map<u32, u32> semanticInputHistogram;
+  std::map<u32, u32> demandedOutputHistogram;
   std::map<u32, u32> inputHistogram;
   std::map<u32, u32> outputHistogram;
   for (u32 index = 0; index < rangeCount; index++) {
     const DolLLVMFunctionRange &range = ranges[index];
+    directMemoryAccesses += range.direct_memory_accesses;
+    genericMemoryAccesses += range.generic_memory_accesses;
+    helperCalls += range.helper_calls;
     if (!(range.abi_flags & DOLLLVM_FUNCTION_ABI_NATIVE))
       continue;
     native++;
     const Counts inputs = stateCounts(range.input_state, range.escape_state);
     const Counts outputs = stateCounts(range.output_state);
+    const Counts semanticInputs = stateCounts(range.semantic_input_state);
+    const Counts demandedOutputs = stateCounts(range.semantic_output_state);
+    const Counts mayDefs = stateCounts(range.may_def_state);
+    const Counts mustDefs = stateCounts(range.must_def_state);
     const Counts escapes = stateCounts(range.escape_state);
     const u32 stateReturnLanes = packedReturnLanes(range);
     const u32 returnRegisters = triple.isAArch64() ? 8u : 3u;
@@ -157,24 +174,57 @@ extern "C" void dolllvm_report_abi_stats(const DolLLVMFunctionRange *ranges,
     cycleMemoryFunctions += cycleMemory;
     nativeMemoryFunctions +=
         (range.abi_flags & DOLLLVM_FUNCTION_ABI_NATIVE_MEMORY) != 0;
+    compactFunctions +=
+        inputs.integer + inputs.floating <= 4u && stateReturnLanes <= 2u;
+    boundaryLoads += inputs.integer + inputs.floating;
+    boundaryStores += outputs.integer + outputs.floating;
+    nativeCallEdges += range.native_call_targets;
+    nativeCallDepth = std::max(nativeCallDepth, range.native_call_depth);
+    semanticInputHistogram[semanticInputs.integer + semanticInputs.floating]++;
+    demandedOutputHistogram[demandedOutputs.integer +
+                            demandedOutputs.floating]++;
     inputHistogram[inputs.integer + inputs.floating]++;
     outputHistogram[outputs.integer + outputs.floating]++;
     if (full)
       fprintf(output,
-              "dolllvm abi fn=%08X in=%u/%u out=%u/%u escape=%u/%u stack=%u "
-              "return_lanes=%u sret=%s cycle_memory=%s native_memory=%s\n",
-              range.start, inputs.integer, inputs.floating, outputs.integer,
-              outputs.floating, escapes.integer, escapes.floating, stackArgs,
-              returnLanes, sret ? "yes" : "no", cycleMemory ? "yes" : "no",
+              "dolllvm abi fn=%08X semantic_in=%u/%u in=%u/%u may_def=%u/%u "
+              "must_def=%u/%u demanded_out=%u/%u out=%u/%u escape=%u/%u "
+              "stack=%u return_lanes=%u sret=%s compact=%s "
+              "cycle_memory=%s native_memory=%s direct_memory=%u "
+              "generic_memory=%u helpers=%u calls=%u call_depth=%u\n",
+              range.start, semanticInputs.integer, semanticInputs.floating,
+              inputs.integer, inputs.floating, mayDefs.integer,
+              mayDefs.floating, mustDefs.integer, mustDefs.floating,
+              demandedOutputs.integer, demandedOutputs.floating,
+              outputs.integer, outputs.floating, escapes.integer,
+              escapes.floating, stackArgs, returnLanes, sret ? "yes" : "no",
+              inputs.integer + inputs.floating <= 4u && stateReturnLanes <= 2u
+                  ? "yes"
+                  : "no",
+              cycleMemory ? "yes" : "no",
               (range.abi_flags & DOLLLVM_FUNCTION_ABI_NATIVE_MEMORY) ? "yes"
-                                                                     : "no");
+                                                                     : "no",
+              range.direct_memory_accesses, range.generic_memory_accesses,
+              range.helper_calls, range.native_call_targets,
+              range.native_call_depth);
   }
   fprintf(output,
           "dolllvm abi target=%s native=%u compat=%u stack_functions=%u "
           "sret_functions=%u cycle_memory_functions=%u "
-          "native_memory_functions=%u\n",
+          "native_memory_functions=%u compact_functions=%u "
+          "boundary_loads=%llu boundary_stores=%llu direct_memory=%llu "
+          "generic_memory=%llu helpers=%llu native_call_edges=%llu "
+          "native_call_depth=%u\n",
           targetTriple, native, rangeCount - native, stackFunctions,
-          sretFunctions, cycleMemoryFunctions, nativeMemoryFunctions);
+          sretFunctions, cycleMemoryFunctions, nativeMemoryFunctions,
+          compactFunctions, static_cast<unsigned long long>(boundaryLoads),
+          static_cast<unsigned long long>(boundaryStores),
+          static_cast<unsigned long long>(directMemoryAccesses),
+          static_cast<unsigned long long>(genericMemoryAccesses),
+          static_cast<unsigned long long>(helperCalls),
+          static_cast<unsigned long long>(nativeCallEdges), nativeCallDepth);
+  printHistogram(output, "semantic_live_ins", semanticInputHistogram);
+  printHistogram(output, "demanded_live_outs", demandedOutputHistogram);
   printHistogram(output, "live_ins", inputHistogram);
   printHistogram(output, "live_outs", outputHistogram);
 }

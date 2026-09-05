@@ -24,6 +24,7 @@ void func_80003A20(CPUState *cpu);
 void func_80003A60(CPUState *cpu);
 void func_80003AA0(CPUState *cpu);
 void func_80004200(CPUState *cpu);
+void func_80004300(CPUState *cpu);
 void func_80004500(CPUState *cpu);
 
 static u32 interception_address;
@@ -169,7 +170,14 @@ static void bench_call_chain(CPUState *cpu, u32 iterations) {
     prepare(cpu, 0x80004200u);
     cpu->gpr[4] = i;
     cpu->gpr[5] = inner;
-    func_80004200(cpu);
+    while (cpu->pc != 0x81234564u) {
+      if (cpu->pc >= 0x80004200u && cpu->pc < 0x80004218u)
+        func_80004200(cpu);
+      else if (cpu->pc >= 0x80004300u && cpu->pc < 0x80004308u)
+        func_80004300(cpu);
+      else
+        return;
+    }
     checksum += cpu->gpr[4] + cpu->pc;
   }
   report("call_chain", outer * inner, begin, checksum);

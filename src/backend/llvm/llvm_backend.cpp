@@ -13,11 +13,11 @@
 #include <system_error>
 #include <vector>
 
-#include <llvm/IR/LegacyPassManager.h>
 #include <llvm/Analysis/ModuleSummaryAnalysis.h>
 #include <llvm/Analysis/ProfileSummaryInfo.h>
 #include <llvm/Bitcode/BitcodeWriter.h>
 #include <llvm/Config/llvm-config.h>
+#include <llvm/IR/LegacyPassManager.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Verifier.h>
 #include <llvm/Support/FileSystem.h>
@@ -34,9 +34,8 @@ int selectedCodegenLevel(int ir_level) {
     return ir_level > 0 ? 2 : 0;
   char *end = nullptr;
   long level = std::strtol(configured, &end, 10);
-  return end && !*end && level >= 0 && level <= 3
-             ? static_cast<int>(level)
-             : (ir_level > 0 ? 2 : 0);
+  return end && !*end && level >= 0 && level <= 3 ? static_cast<int>(level)
+                                                  : (ir_level > 0 ? 2 : 0);
 }
 
 bool readableProfile(const char *path, FILE *diagnostics) {
@@ -66,8 +65,7 @@ void applyTargetAttributes(Module &module,
   }
 }
 
-bool writeIR(Module &module, const DolLLVMOptions &options,
-             FILE *diagnostics) {
+bool writeIR(Module &module, const DolLLVMOptions &options, FILE *diagnostics) {
   if (!options.emit_ir || !options.ir_path)
     return true;
   std::error_code error;
@@ -122,9 +120,9 @@ bool writeThinLTO(Module &module, const DolLLVMOptions &options,
 } // namespace
 
 extern "C" bool dolllvm_emit_object(const DolIRModule *source,
-                                     const char *object_path,
-                                     const DolLLVMOptions *given,
-                                     FILE *diagnostics) {
+                                    const char *object_path,
+                                    const DolLLVMOptions *given,
+                                    FILE *diagnostics) {
   if (!source || !object_path || !diagnostics)
     return false;
   DolLLVMOptions options{};
@@ -136,7 +134,10 @@ extern "C" bool dolllvm_emit_object(const DolIRModule *source,
   if (options.function_ranges && options.function_range_count) {
     ranges.assign(options.function_ranges,
                   options.function_ranges + options.function_range_count);
-    dolllvm::prepareModuleABIs(*source, ranges);
+    dolllvm::prepareModuleABIs(*source, ranges, options.runtime);
+    dolllvm_apply_native_abi_policy(ranges.data(),
+                                    static_cast<u32>(ranges.size()),
+                                    options.native_abi_policy);
     options.function_ranges = ranges.data();
   }
   if (!readableProfile(options.profile_use_path, diagnostics))
@@ -170,8 +171,8 @@ extern "C" bool dolllvm_emit_object(const DolIRModule *source,
       return;
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - checkpoint);
-    fprintf(diagnostics, "dolllvm timing %s %s: %lld ms\n", object_path,
-            stage, static_cast<long long>(elapsed.count()));
+    fprintf(diagnostics, "dolllvm timing %s %s: %lld ms\n", object_path, stage,
+            static_cast<long long>(elapsed.count()));
     checkpoint = std::chrono::steady_clock::now();
   };
 
@@ -203,7 +204,7 @@ extern "C" bool dolllvm_emit_object(const DolIRModule *source,
 }
 
 extern "C" bool dolllvm_effective_triple(const DolLLVMOptions *options,
-                                          char *out, size_t size) {
+                                         char *out, size_t size) {
   if (!out || !size)
     return false;
   dolllvm::TargetProfile profile;
@@ -215,9 +216,8 @@ extern "C" bool dolllvm_effective_triple(const DolLLVMOptions *options,
   return true;
 }
 
-extern "C" bool
-dolllvm_object_matches_options(const char *path,
-                               const DolLLVMOptions *options) {
+extern "C" bool dolllvm_object_matches_options(const char *path,
+                                               const DolLLVMOptions *options) {
   dolllvm::TargetProfile profile;
   std::string error;
   return dolllvm::resolveTargetProfile(options, profile, error) &&
@@ -234,13 +234,19 @@ extern "C" bool dolllvm_codegen_fingerprint(const DolLLVMOptions *options,
     return false;
   const int written = std::snprintf(
       out, size,
-      "llvm=%s|triple=%s|cpu=%s|features=%s|native-abi=%u|mask-words=%u|"
+      "llvm=%s|triple=%s|cpu=%s|features=%s|native-abi=%u|native-policy=%u|"
+      "runtime=%u|"
+      "mask-words=%u|"
       "state-count=%u|calling=fastcc|control=pc32x2|return=i64-lanes|"
       "escape=sjlj|memory=proven-mem1-v1|cycles=return-or-chain|"
       "x86-return-registers=3|"
       "aarch64-return-registers=8|reloc=pic|pipeline=default-per-module",
       LLVM_VERSION_STRING, profile.triple.c_str(), profile.cpu.c_str(),
       profile.features.c_str(), DOLLLVM_NATIVE_ABI_VERSION,
+      static_cast<unsigned>(options ? options->native_abi_policy
+                                    : DOLLLVM_NATIVE_ABI_UNRESTRICTED),
+      static_cast<unsigned>(options ? options->runtime
+                                    : DOLLLVM_RUNTIME_RECOMPCORE),
       DOLIR_STATE_MASK_WORDS, DOLIR_STATE_COUNT);
   return written >= 0 && static_cast<size_t>(written) < size;
 }

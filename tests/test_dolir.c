@@ -168,10 +168,19 @@ static bool test_segment_registers(void) {
     return true;
 }
 
+static bool test_cache_timing(void) {
+    PPCInst dcbst = decode(0x7C11906Cu, 0x80005000u);
+    PPCInst icbi = decode(0x7C1BE7ACu, 0x80005004u);
+    CHECK(dolir_instruction_cycle_cost(&dcbst) == 5);
+    CHECK(dolir_instruction_cycle_cost(&icbi) == 4);
+    return true;
+}
+
 int main(void) {
     if (!test_native_loop() || !test_memory_and_vector() ||
         !test_static_memory_provenance() ||
-        !test_float_record_and_paired_compare() || !test_segment_registers())
+        !test_float_record_and_paired_compare() || !test_segment_registers() ||
+        !test_cache_timing())
         return 1;
     puts("dolir tests passed");
     return 0;

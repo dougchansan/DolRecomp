@@ -34,8 +34,14 @@ separate_arguments(extra_c_flags NATIVE_COMMAND "${C_FLAGS}")
 set(objects
     "${chunks}/chunk_0000_text0_80003100.o"
     "${chunks}/chunk_0000_text0_80003100_x86_64_v3.o"
-    "${chunks}/chunk_0001_text0_80003900.o"
-    "${chunks}/chunk_0001_text0_80003900_x86_64_v3.o"
+    "${chunks}/chunk_0001_text0_80003110.o"
+    "${chunks}/chunk_0001_text0_80003110_x86_64_v3.o"
+    "${chunks}/chunk_0002_text0_80003200.o"
+    "${chunks}/chunk_0002_text0_80003200_x86_64_v3.o"
+    "${chunks}/chunk_0003_text0_80003204.o"
+    "${chunks}/chunk_0003_text0_80003204_x86_64_v3.o"
+    "${chunks}/chunk_0004_text0_80003A04.o"
+    "${chunks}/chunk_0004_text0_80003A04_x86_64_v3.o"
 )
 execute_process(
     COMMAND "${C_COMPILER}" ${extra_c_flags} -std=c11 -I "${REPO_SRC}"

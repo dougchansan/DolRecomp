@@ -37,6 +37,65 @@ void FunctionEmitter::reloadState(DolIRStateSlot slot) {
   builder_.CreateStore(loadContext(slot), state_[slot]);
 }
 
+void FunctionEmitter::reloadModernState() {
+  Type *i64 = Type::getInt64Ty(context_);
+  ArrayType *valuesType = ArrayType::get(i64, DOLIR_STATE_COUNT);
+  ArrayType *maskType =
+      ArrayType::get(i64, DOLIR_STATE_MASK_WORDS);
+  const std::string name = source_.name + std::string(".used");
+  GlobalVariable *mask = module_.getGlobalVariable(name, true);
+  if (!mask) {
+    SmallVector<Constant *, DOLIR_STATE_MASK_WORDS> words;
+    for (u32 word = 0; word < DOLIR_STATE_MASK_WORDS; word++) {
+      u64 bits = 0;
+      for (u32 bit = 0; bit < 64; bit++) {
+        const u32 slot = word * 64u + bit;
+        if (slot < DOLIR_STATE_COUNT && used_[slot])
+          bits |= 1ull << bit;
+      }
+      words.push_back(builder_.getInt64(bits));
+    }
+    mask = new GlobalVariable(module_, maskType, true,
+                              GlobalValue::PrivateLinkage,
+                              ConstantArray::get(maskType, words), name);
+  }
+  Type *pointer = PointerType::getUnqual(context_);
+  FunctionCallee reload = module_.getOrInsertFunction(
+      "moderngekko_reload_state",
+      FunctionType::get(Type::getVoidTy(context_),
+                        {pointer, pointer, pointer}, false));
+  if (auto *function = dyn_cast<Function>(reload.getCallee())) {
+    function->addFnAttr(Attribute::Cold);
+    function->addFnAttr(Attribute::NoUnwind);
+  }
+  Value *values = builder_.CreateStructGEP(chainType(), chain_, 8);
+  CallInst *call = builder_.CreateCall(reload, {state_interface_, values, mask});
+  call->addFnAttr(Attribute::Cold);
+  call->addFnAttr(Attribute::NoUnwind);
+  for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++) {
+    if (!used_[slot])
+      continue;
+    auto stateSlot = static_cast<DolIRStateSlot>(slot);
+    if (slotInMemory(stateSlot))
+      continue;
+    Value *value = nullptr;
+    if (stateSlot == DOLIR_STATE_PC || stateSlot == DOLIR_STATE_TIMEBASE ||
+        stateSlot == DOLIR_STATE_PROGRAM_EXCEPTION ||
+        stateSlot == DOLIR_STATE_DOWNCOUNT) {
+      value = loadContext(stateSlot);
+    } else {
+      value = builder_.CreateLoad(
+          i64, builder_.CreateInBoundsGEP(
+                   valuesType, values,
+                   {builder_.getInt64(0), builder_.getInt64(slot)}));
+      Type *target = type(dolir_state_type(stateSlot));
+      value = target->isDoubleTy() ? builder_.CreateBitCast(value, target)
+                                  : builder_.CreateZExtOrTrunc(value, target);
+    }
+    builder_.CreateStore(value, state_[slot]);
+  }
+}
+
 void FunctionEmitter::reloadUsedState() {
   invalidateFPRepresentations();
   fp_available_checked_ = false;
@@ -44,6 +103,10 @@ void FunctionEmitter::reloadUsedState() {
   known_state_.fill(nullptr);
   psq_direct_proven_ = false;
   psq_indexed_proven_ = false;
+  if (modern_runtime_) {
+    reloadModernState();
+    return;
+  }
   for (u32 slot = 0; slot < DOLIR_STATE_COUNT; slot++) {
     if (used_[slot])
       reloadState(static_cast<DolIRStateSlot>(slot));
@@ -95,6 +158,20 @@ void FunctionEmitter::emitProgramException(const DolIRInstruction &inst) {
   BasicBlock *resume = BasicBlock::Create(context_, "trap_resume", function_);
   builder_.CreateCondBr(operand(inst, 0), taken, resume);
   builder_.SetInsertPoint(taken);
+  if (modern_runtime_) {
+    Value *exceptions = builder_.CreateLoad(Type::getInt32Ty(context_),
+                                            state_[DOLIR_STATE_EXCEPTION]);
+    Value *updated =
+        builder_.CreateOr(exceptions, builder_.getInt32(0x80));
+    builder_.CreateStore(updated, state_[DOLIR_STATE_EXCEPTION]);
+    noteStateWrite(DOLIR_STATE_EXCEPTION, updated);
+    Value *cause = builder_.getInt32(inst.immediate);
+    builder_.CreateStore(cause, state_[DOLIR_STATE_SRR1]);
+    noteStateWrite(DOLIR_STATE_SRR1, cause);
+    sideExit(inst.guest_pc, 1);
+    builder_.SetInsertPoint(resume);
+    return;
+  }
   materialize(inst.guest_pc);
   auto callee = module_.getOrInsertFunction(
       "ppc_program_exception",
@@ -156,6 +233,11 @@ void FunctionEmitter::emitLSWX(const DolIRInstruction &inst) {
 }
 
 Value *FunctionEmitter::emitRuntimeBoundary(const DolIRInstruction &inst) {
+  if (modern_runtime_ && inst.aux == DOLIR_HELPER_CACHE_CONTROL) {
+    emitCacheControl(inst);
+    return nullptr;
+  }
+
   materialize(inst.guest_pc);
   Type *ptr = PointerType::getUnqual(context_);
   Value *result = nullptr;

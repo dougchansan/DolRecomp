@@ -96,6 +96,19 @@ int main(int argc, char** argv) {
         describe_game(game_name, sizeof(game_name), title_id, 0);
     }
 
+    if (opts.llvm_runtime == DOLLLVM_RUNTIME_MODERNGEKKO) {
+        if (opts.backend != DOLRECOMP_BACKEND_LLVM) {
+            fprintf(stderr, "error: the ModernGekko runtime requires the LLVM backend\n");
+            return 1;
+        }
+        if (!opts.game_id && title_id[0])
+            opts.game_id = title_id;
+        if (!opts.game_id) {
+            fprintf(stderr, "error: --game-id is required for a native GameCube module\n");
+            return 1;
+        }
+    }
+
     if (espresso_rpx_mode) {
         if (!has_rpx_extension(input_path)) {
             fprintf(stderr, "error: espresso mode expects an .rpx input\n");

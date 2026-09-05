@@ -1,0 +1,221 @@
+#include "backend/native_module.h"
+#include "backend/native_state.h"
+
+static void emit_ranges(FILE* out, const FunctionList* functions) {
+    fprintf(out,
+            "\ntypedef MGNativeExit (*ModernGekkoNativeEntry)(\n"
+            "    const MGNativeRuntime*, const MGNativeState*, uint32_t, uint32_t);\n"
+            "typedef struct {\n"
+            "    uint32_t start;\n"
+            "    uint32_t end;\n"
+            "    uint64_t hash;\n"
+            "    ModernGekkoNativeEntry entry;\n"
+            "} ModernGekkoNativeRange;\n\n"
+            "static const ModernGekkoNativeRange moderngekko_native_ranges[] = {\n");
+    for (u32 i = 0; i < functions->count; i++) {
+        const FunctionRange* range = &functions->ranges[i];
+        fprintf(out, "    {0x%08Xu, 0x%08Xu, UINT64_C(0x%016llX), func_%08X},\n",
+                range->start, range->end, (unsigned long long)range->hash,
+                range->start);
+    }
+    if (!functions->count)
+        fprintf(out, "    {0u, 0u, 0u, 0},\n");
+    fprintf(out,
+            "};\n"
+            "enum { MODERNGEKKO_NATIVE_DIRTY, MODERNGEKKO_NATIVE_VALID, "
+            "MODERNGEKKO_NATIVE_CHANGED };\n"
+            "static _Atomic uint32_t moderngekko_native_state[%uu];\n"
+            "static _Atomic uint32_t moderngekko_native_unavailable;\n"
+            "static _Atomic uint32_t moderngekko_native_needs_validation;\n\n",
+            functions->count ? functions->count : 1u);
+}
+
+static void emit_lookup(FILE* out, u32 count) {
+    fprintf(out,
+            "#define MODERNGEKKO_NATIVE_LOOKUP_SIZE 4096u\n"
+            "static _Atomic uint64_t moderngekko_native_lookup[\n"
+            "    MODERNGEKKO_NATIVE_LOOKUP_SIZE];\n\n"
+            "static uint32_t moderngekko_native_find(uint32_t address) {\n"
+            "    uint32_t slot = (address >> 2u) &\n"
+            "        (MODERNGEKKO_NATIVE_LOOKUP_SIZE - 1u);\n"
+            "    uint64_t cached = atomic_load_explicit(\n"
+            "        &moderngekko_native_lookup[slot], memory_order_relaxed);\n"
+            "    uint32_t cached_index = (uint32_t)cached;\n"
+            "    if ((uint32_t)(cached >> 32u) == address && cached_index != 0u)\n"
+            "        return cached_index - 1u;\n"
+            "    uint32_t first = 0;\n"
+            "    uint32_t count = %uu;\n"
+            "    while (first < count) {\n"
+            "        uint32_t middle = first + (count - first) / 2u;\n"
+            "        const ModernGekkoNativeRange* range = &moderngekko_native_ranges[middle];\n"
+            "        if (address < range->start) count = middle;\n"
+            "        else if (address >= range->end) first = middle + 1u;\n"
+            "        else {\n"
+            "            atomic_store_explicit(&moderngekko_native_lookup[slot],\n"
+            "                ((uint64_t)address << 32u) | (uint64_t)(middle + 1u),\n"
+            "                memory_order_relaxed);\n"
+            "            return middle;\n"
+            "        }\n"
+            "    }\n"
+            "    return UINT32_MAX;\n"
+            "}\n\n",
+            count);
+}
+
+static void emit_validation(FILE* out, u32 count) {
+    fprintf(out,
+            "static const uint8_t* moderngekko_native_bytes(\n"
+            "    const MGNativeRuntime* runtime, const ModernGekkoNativeRange* range) {\n"
+            "    uint32_t size = range->end - range->start;\n"
+            "    if (range->start >= 0x80000000u &&\n"
+            "        range->start - 0x80000000u <= runtime->mem1_size &&\n"
+            "        size <= runtime->mem1_size - (range->start - 0x80000000u))\n"
+            "        return runtime->mem1 + (range->start - 0x80000000u);\n"
+            "    if (range->start >= 0x90000000u &&\n"
+            "        range->start - 0x90000000u <= runtime->mem2_size &&\n"
+            "        size <= runtime->mem2_size - (range->start - 0x90000000u))\n"
+            "        return runtime->mem2 + (range->start - 0x90000000u);\n"
+            "    return 0;\n"
+            "}\n\n"
+            "static uint64_t moderngekko_native_hash(const uint8_t* bytes, uint32_t size) {\n"
+            "    uint64_t hash = UINT64_C(0xCBF29CE484222325);\n"
+            "    while (size--) { hash ^= *bytes++; hash *= UINT64_C(0x100000001B3); }\n"
+            "    return hash;\n"
+            "}\n\n"
+            "static int moderngekko_native_validate_index(\n"
+            "    const MGNativeRuntime* runtime, uint32_t index) {\n"
+            "    uint32_t observed = atomic_load_explicit(\n"
+            "        &moderngekko_native_state[index], memory_order_acquire);\n"
+            "    for (;;) {\n"
+            "        uint32_t status = observed & 3u;\n"
+            "        if (status == MODERNGEKKO_NATIVE_VALID) return 1;\n"
+            "        if (status == MODERNGEKKO_NATIVE_CHANGED) return 0;\n"
+            "        const ModernGekkoNativeRange* range = &moderngekko_native_ranges[index];\n"
+            "        const uint8_t* bytes = moderngekko_native_bytes(runtime, range);\n"
+            "        int matches = bytes && moderngekko_native_hash(\n"
+            "            bytes, range->end - range->start) == range->hash;\n"
+            "        uint32_t desired = (observed & ~3u) |\n"
+            "            (matches ? MODERNGEKKO_NATIVE_VALID : MODERNGEKKO_NATIVE_CHANGED);\n"
+            "        if (atomic_compare_exchange_weak_explicit(\n"
+            "                &moderngekko_native_state[index], &observed, desired,\n"
+            "                memory_order_acq_rel, memory_order_acquire)) {\n"
+            "            if (matches) atomic_fetch_sub_explicit(\n"
+            "                &moderngekko_native_unavailable, 1u, memory_order_release);\n"
+            "            return matches;\n"
+            "        }\n"
+            "    }\n"
+            "}\n\n"
+            "bool moderngekko_native_region_available(\n"
+            "    const MGNativeRuntime* runtime, uint32_t start, uint32_t end) {\n"
+            "    if (!atomic_load_explicit(&moderngekko_native_unavailable, memory_order_acquire))\n"
+            "        return true;\n"
+            "    uint32_t index = moderngekko_native_find(start);\n"
+            "    if (index == UINT32_MAX) return false;\n"
+            "    while (index < %uu && moderngekko_native_ranges[index].start < end) {\n"
+            "        if (!moderngekko_native_validate_index(runtime, index)) return false;\n"
+            "        index++;\n"
+            "    }\n"
+            "    return true;\n"
+            "}\n\n",
+            count);
+}
+
+static void emit_entry(FILE* out, u32 count) {
+    fprintf(out,
+            "static void moderngekko_native_validate_all(\n"
+            "    const MGNativeRuntime* runtime) {\n"
+            "    if (!atomic_exchange_explicit(&moderngekko_native_needs_validation, 0u,\n"
+            "                                  memory_order_acq_rel))\n"
+            "        return;\n"
+            "    for (uint32_t index = 0; index < %uu; index++)\n"
+            "        moderngekko_native_validate_index(runtime, index);\n"
+            "}\n\n"
+            "static int moderngekko_native_contains(uint32_t address) {\n"
+            "    return moderngekko_native_find(address) != UINT32_MAX;\n"
+            "}\n\n"
+            "static int moderngekko_native_validate(\n"
+            "    const MGNativeRuntime* runtime, uint32_t address) {\n"
+            "    moderngekko_native_validate_all(runtime);\n"
+            "    uint32_t index = moderngekko_native_find(address);\n"
+            "    return index != UINT32_MAX && moderngekko_native_validate_index(runtime, index);\n"
+            "}\n\n"
+            "static MGNativeExit moderngekko_native_run(\n"
+            "    const MGNativeRuntime* runtime, const MGNativeState* state,\n"
+            "    uint32_t entry_pc, uint32_t cycle_budget) {\n"
+            "    moderngekko_native_validate_all(runtime);\n"
+            "    uint32_t index = moderngekko_native_find(entry_pc);\n"
+            "    if (index == UINT32_MAX || !moderngekko_native_validate_index(runtime, index)) {\n"
+            "        MGNativeExit exit = {MG_NATIVE_EXIT_INVALIDATED_CODE, entry_pc,\n"
+            "            entry_pc + 4u, 0u, 0u, 0u, 0u};\n"
+            "        return exit;\n"
+            "    }\n"
+            "    return moderngekko_native_ranges[index].entry(\n"
+            "        runtime, state, entry_pc, cycle_budget);\n"
+            "}\n\n",
+            count);
+}
+
+static void emit_invalidation(FILE* out, u32 count) {
+    fprintf(out,
+            "static void moderngekko_native_invalidate(uint32_t address, uint32_t size) {\n"
+            "    uint32_t end = UINT32_MAX - address < size ? UINT32_MAX : address + size;\n"
+            "    uint32_t first = 0;\n"
+            "    uint32_t last = %uu;\n"
+            "    while (first < last) {\n"
+            "        uint32_t middle = first + (last - first) / 2u;\n"
+            "        if (moderngekko_native_ranges[middle].end <= address)\n"
+            "            first = middle + 1u;\n"
+            "        else\n"
+            "            last = middle;\n"
+            "    }\n"
+            "    for (uint32_t index = first; index < %uu; index++) {\n"
+            "        const ModernGekkoNativeRange* range = &moderngekko_native_ranges[index];\n"
+            "        if (range->start >= end) break;\n"
+            "        uint32_t observed = atomic_load_explicit(\n"
+            "            &moderngekko_native_state[index], memory_order_acquire);\n"
+            "        uint32_t desired;\n"
+            "        do {\n"
+            "            desired = ((observed & ~3u) + 4u) | MODERNGEKKO_NATIVE_DIRTY;\n"
+            "        } while (!atomic_compare_exchange_weak_explicit(\n"
+            "            &moderngekko_native_state[index], &observed, desired,\n"
+            "            memory_order_acq_rel, memory_order_acquire));\n"
+            "        if ((observed & 3u) == MODERNGEKKO_NATIVE_VALID)\n"
+            "            atomic_fetch_add_explicit(\n"
+            "                &moderngekko_native_unavailable, 1u, memory_order_release);\n"
+            "    }\n"
+            "}\n\n"
+            "static void moderngekko_native_reset(void) {\n"
+            "    for (uint32_t index = 0; index < %uu; index++)\n"
+            "        atomic_store_explicit(&moderngekko_native_state[index],\n"
+            "                              MODERNGEKKO_NATIVE_DIRTY, memory_order_relaxed);\n"
+            "    atomic_store_explicit(&moderngekko_native_unavailable, %uu,\n"
+            "                          memory_order_relaxed);\n"
+            "    atomic_store_explicit(&moderngekko_native_needs_validation, 1u,\n"
+            "                          memory_order_release);\n"
+            "}\n\n",
+            count, count, count, count);
+}
+
+void emit_native_module(FILE* out, const FunctionList* functions,
+                        const char* game_id) {
+    emit_native_state_commit(out);
+    emit_ranges(out, functions);
+    emit_lookup(out, functions->count);
+    emit_validation(out, functions->count);
+    emit_entry(out, functions->count);
+    emit_invalidation(out, functions->count);
+    fprintf(out,
+            "static const MGNativeModule moderngekko_native_module = {\n"
+            "    MG_NATIVE_ABI_VERSION, sizeof(MGNativeModule),\n"
+            "    \"DolRecomp %s\", \"%s\",\n"
+            "    moderngekko_native_contains, moderngekko_native_validate,\n"
+            "    moderngekko_native_run, moderngekko_native_invalidate,\n"
+            "    moderngekko_native_reset,\n"
+            "};\n\n"
+            "MG_NATIVE_EXPORT const MGNativeModule* moderngekko_get_native_module(\n"
+            "    uint32_t runtime_abi_version) {\n"
+            "    return runtime_abi_version == MG_NATIVE_ABI_VERSION\n"
+            "               ? &moderngekko_native_module : 0;\n"
+            "}\n",
+            game_id, game_id);
+}

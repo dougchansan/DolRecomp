@@ -45,12 +45,12 @@ static const ProfileDefinition *definition(DolLLVMTargetProfile id) {
 
 void initializeTargets() {
   static const bool once = [] {
-    // Only the targets DolRecomp can emit, and only those the host LLVM
-    // actually ships. InitializeAll* expands to every target this LLVM was
-    // configured with, which forces the link to carry backends the emitter
-    // never uses; naming X86 and AArch64 unconditionally instead would fail to
-    // compile against an LLVM built without one of them. CMake derives these
-    // two macros from LLVM_TARGETS_TO_BUILD, so this tracks the host build.
+  // Only the targets DolRecomp can emit, and only those the host LLVM
+  // actually ships. InitializeAll* expands to every target this LLVM was
+  // configured with, which forces the link to carry backends the emitter
+  // never uses; naming X86 and AArch64 unconditionally instead would fail to
+  // compile against an LLVM built without one of them. CMake derives these
+  // two macros from LLVM_TARGETS_TO_BUILD, so this tracks the host build.
 #if defined(DOLLLVM_HAVE_X86_TARGET)
     LLVMInitializeX86TargetInfo();
     LLVMInitializeX86Target();
@@ -72,8 +72,8 @@ void initializeTargets() {
 
 bool resolveTargetProfile(const DolLLVMOptions *options, TargetProfile &result,
                           std::string &error) {
-  DolLLVMTargetProfile id = options ? options->target_profile
-                                    : DOLLLVM_TARGET_HOST;
+  DolLLVMTargetProfile id =
+      options ? options->target_profile : DOLLLVM_TARGET_HOST;
   const ProfileDefinition *selected = definition(id);
   if (!selected) {
     error = "unknown target profile";
@@ -121,10 +121,10 @@ static CodeGenOptLevel codegenLevel(int level) {
   return CodeGenOptLevel::Aggressive;
 }
 
-std::unique_ptr<TargetMachine>
-createTargetMachine(const TargetProfile &profile, int optimization_level,
-                    DolLLVMSemantics semantics,
-                    std::string &error) {
+std::unique_ptr<TargetMachine> createTargetMachine(const TargetProfile &profile,
+                                                   int optimization_level,
+                                                   DolLLVMSemantics semantics,
+                                                   std::string &error) {
   initializeTargets();
   const Target *target = TargetRegistry::lookupTarget(profile.triple, error);
   if (!target)
@@ -151,7 +151,10 @@ bool objectMatchesProfile(const char *path, const TargetProfile &profile) {
   if (triple.isOSBinFormatMachO())
     return count >= 4 && bytes[0] == 0xcf && bytes[1] == 0xfa &&
            bytes[2] == 0xed && bytes[3] == 0xfe;
-  if (count < 20 || std::memcmp(bytes, "\x7f" "ELF", 4) != 0)
+  if (count < 20 || std::memcmp(bytes,
+                                "\x7f"
+                                "ELF",
+                                4) != 0)
     return false;
   const unsigned machine = unsigned(bytes[18]) | (unsigned(bytes[19]) << 8);
   return machine == (profile.aarch64 ? 183u : 62u);
@@ -160,7 +163,7 @@ bool objectMatchesProfile(const char *path, const TargetProfile &profile) {
 } // namespace dolllvm
 
 extern "C" bool dolllvm_parse_target_profile(const char *name,
-                                               DolLLVMTargetProfile *profile) {
+                                             DolLLVMTargetProfile *profile) {
   if (!name || !profile)
     return false;
   for (const auto &candidate : dolllvm::definitions) {

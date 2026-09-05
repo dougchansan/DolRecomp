@@ -16,6 +16,9 @@ void print_usage(const char* argv0) {
     fprintf(stderr, "  -jN                            Use N worker jobs for split C output (e.g. -j14)\n");
     fprintf(stderr, "  --cpu gekko|broadway|espresso  Select CPU profile (default: broadway)\n");
     fprintf(stderr, "  --backend c|llvm               Select generated-code backend (default: c)\n");
+    fprintf(stderr, "  --native-abi unrestricted|compact|off  Select LLVM native-call policy\n");
+    fprintf(stderr, "  --runtime recompcore|moderngekko Select the generated module runtime\n");
+    fprintf(stderr, "  --game-id <id>                  Set the six-character native module game ID\n");
     fprintf(stderr, "  --state-in-memory              Keep non-native guest state in CPUState\n");
     fprintf(stderr, "  --targets <set>                host, x86-64-v2, x86-64-v3, aarch64, aarch64-a57\n");
     fprintf(stderr, "  --semantics exact|fast         PowerPC floating-point semantics (default: exact)\n");
@@ -198,6 +201,46 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
             continue;
         }
 
+        if (strcmp(arg, "--runtime") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "error: --runtime needs recompcore or moderngekko\n");
+                return 0;
+            }
+            const char* runtime = argv[++i];
+            if (ascii_case_equal(runtime, "recompcore"))
+                opts->llvm_runtime = DOLLLVM_RUNTIME_RECOMPCORE;
+            else if (ascii_case_equal(runtime, "moderngekko"))
+                opts->llvm_runtime = DOLLLVM_RUNTIME_MODERNGEKKO;
+            else {
+                fprintf(stderr, "error: unknown runtime '%s'\n", runtime);
+                return 0;
+            }
+            continue;
+        }
+
+        if (strncmp(arg, "--runtime=", 10) == 0) {
+            const char* runtime = arg + 10;
+            if (ascii_case_equal(runtime, "recompcore"))
+                opts->llvm_runtime = DOLLLVM_RUNTIME_RECOMPCORE;
+            else if (ascii_case_equal(runtime, "moderngekko"))
+                opts->llvm_runtime = DOLLLVM_RUNTIME_MODERNGEKKO;
+            else {
+                fprintf(stderr, "error: unknown runtime '%s'\n", runtime);
+                return 0;
+            }
+            continue;
+        }
+
+        if (strcmp(arg, "--game-id") == 0 || strncmp(arg, "--game-id=", 10) == 0) {
+            const char* game_id = arg[9] == '=' ? arg + 10 : (i + 1 < argc ? argv[++i] : NULL);
+            if (!game_id || !is_title_id(game_id)) {
+                fprintf(stderr, "error: --game-id needs six letters or numbers\n");
+                return 0;
+            }
+            opts->game_id = game_id;
+            continue;
+        }
+
         if (strcmp(arg, "--no-state-in-memory") == 0) {
             opts->state_in_memory = 0;
             continue;
@@ -329,9 +372,44 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
             if (i + 1 >= argc ||
                 !parse_u32_arg(argv[++i], "--partition-instructions",
                                &opts->partition_instructions) ||
-                opts->partition_instructions < 128u ||
+                opts->partition_instructions < 64u ||
                 opts->partition_instructions > 4096u) {
-                fprintf(stderr, "error: partition instructions must be 128..4096\n");
+                fprintf(stderr, "error: partition instructions must be 64..4096\n");
+                return 0;
+            }
+            continue;
+        }
+
+        if (strcmp(arg, "--native-abi") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr,
+                        "error: --native-abi needs unrestricted, compact, or off\n");
+                return 0;
+            }
+            const char* mode = argv[++i];
+            if (strcmp(mode, "unrestricted") == 0)
+                opts->llvm_native_abi = DOLLLVM_NATIVE_ABI_UNRESTRICTED;
+            else if (strcmp(mode, "compact") == 0)
+                opts->llvm_native_abi = DOLLLVM_NATIVE_ABI_COMPACT;
+            else if (strcmp(mode, "off") == 0)
+                opts->llvm_native_abi = DOLLLVM_NATIVE_ABI_DISABLED;
+            else {
+                fprintf(stderr, "error: unknown native ABI policy '%s'\n", mode);
+                return 0;
+            }
+            continue;
+        }
+
+        if (strncmp(arg, "--native-abi=", 13) == 0) {
+            const char* mode = arg + 13;
+            if (strcmp(mode, "unrestricted") == 0)
+                opts->llvm_native_abi = DOLLLVM_NATIVE_ABI_UNRESTRICTED;
+            else if (strcmp(mode, "compact") == 0)
+                opts->llvm_native_abi = DOLLLVM_NATIVE_ABI_COMPACT;
+            else if (strcmp(mode, "off") == 0)
+                opts->llvm_native_abi = DOLLLVM_NATIVE_ABI_DISABLED;
+            else {
+                fprintf(stderr, "error: unknown native ABI policy '%s'\n", mode);
                 return 0;
             }
             continue;
