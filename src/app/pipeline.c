@@ -937,6 +937,81 @@ int emit_code_sections_split(const LoadedCodeSection* sections,
     FunctionList funcs = {0};
     SMCAnalysis smc = {0};
 
+    // Cross-chunk direct calls need the address of every chunk BEFORE any chunk
+    // is written, because run_chunk_jobs emits them in parallel and the emitter
+    // treats the table as read-only once set. Building it as sections are
+    // processed would leave a call into a later section unable to resolve, so it
+    // is computed up front here, using the same partitioning the emit loop below
+    // applies -- the skip condition included, or the table would describe chunks
+    // that do not exist.
+    //
+    // Without this the optimisation is inert: emit_cross_chunk_call() declines
+    // when the table is NULL and every cross-chunk bl returns to the chassis.
+    // The wiring was dropped by the LLVM backend rewrite, leaving the emitter
+    // side orphaned.
+    //
+    // The arrays outlive the loop and are freed at the normal exit. The error
+    // paths inside the loop return without freeing; the process exits
+    // immediately after, and unwinding them all would touch a dozen returns for
+    // memory the OS is about to reclaim.
+    // Kill switch, so the change can be A/B'd against a control built by the
+    // same binary rather than against an older one. Off restores the previous
+    // behaviour exactly: no table, every cross-chunk bl returns to the chassis.
+    // NOTE: this is NOT folded into the module cache key, so an on and an off
+    // build MUST use separate --output roots or they will collide in the cache.
+    const char* xchunk_env = getenv("DOLRECOMP_CROSS_CHUNK_CALLS");
+    const bool xchunk_enabled = !(xchunk_env && xchunk_env[0] == '0' && xchunk_env[1] == '\0');
+
+    u32 chunk_table_count = 0;
+    for (u32 s = 0; s < section_count; s++) {
+        const LoadedCodeSection* section = &sections[s];
+        if (section->size == 0 || !section->data) continue;
+        const u32 instructions = section->size / 4u;
+        if (instructions == 0) continue;
+        chunk_table_count +=
+            (instructions + chunk_instructions - 1u) / chunk_instructions;
+    }
+    u32* chunk_starts = NULL;
+    u32* chunk_ends = NULL;
+    if (chunk_table_count) {
+        chunk_starts = (u32*)calloc(chunk_table_count, sizeof(u32));
+        chunk_ends = (u32*)calloc(chunk_table_count, sizeof(u32));
+    }
+    if (xchunk_enabled && chunk_starts && chunk_ends) {
+        u32 at = 0;
+        for (u32 s = 0; s < section_count; s++) {
+            const LoadedCodeSection* section = &sections[s];
+            if (section->size == 0 || !section->data) continue;
+            const u32 instructions = section->size / 4u;
+            for (u32 start = 0; start < instructions; start += chunk_instructions) {
+                u32 count = instructions - start;
+                if (count > chunk_instructions) count = chunk_instructions;
+                chunk_starts[at] = section->address + start * 4u;
+                chunk_ends[at] = chunk_starts[at] + count * 4u;
+                at++;
+            }
+        }
+        // chunk_start_for() binary-searches, so the table must be ascending.
+        for (u32 i = 1; i < at; i++) {
+            const u32 ks = chunk_starts[i], ke = chunk_ends[i];
+            u32 j = i;
+            while (j > 0 && chunk_starts[j - 1u] > ks) {
+                chunk_starts[j] = chunk_starts[j - 1u];
+                chunk_ends[j] = chunk_ends[j - 1u];
+                j--;
+            }
+            chunk_starts[j] = ks;
+            chunk_ends[j] = ke;
+        }
+        emit_set_chunk_table(chunk_starts, chunk_ends, at);
+    } else {
+        free(chunk_starts);
+        free(chunk_ends);
+        chunk_starts = NULL;
+        chunk_ends = NULL;
+        emit_set_chunk_table(NULL, NULL, 0);
+    }
+
     for (u32 s = 0; s < section_count; s++) {
         const LoadedCodeSection* section = &sections[s];
         if (section->size == 0 || !section->data) continue;
@@ -1081,29 +1156,10 @@ int emit_code_sections_split(const LoadedCodeSection* sections,
             file_count++;
         }
 
-        // Direct cross-chunk calls bypass the chassis dispatcher. That is unsafe
-        // for runtimes which validate mutable guest code at dispatch boundaries,
-        // so only emit them after an explicit opt-in for controlled benchmarks.
-        // funcs accumulates across sections; targets in a later section still
-        // fall back to the dispatcher because their symbols are not known yet.
-        const char* direct = getenv("DOLRECOMP_UNSAFE_DIRECT_CALLS");
-        u32* chunk_starts = NULL;
-        if (direct && strcmp(direct, "1") == 0) {
-            printf("  unsafe cross-chunk direct calls enabled\n");
-            chunk_starts = (u32*)malloc((size_t)funcs.count * sizeof(u32));
-            if (chunk_starts) {
-                for (u32 i = 0; i < funcs.count; ++i)
-                    chunk_starts[i] = funcs.ranges[i].start;
-                emit_set_chunk_table(chunk_starts, funcs.count);
-            }
-        }
-
         u32 active_jobs = effective_chunk_jobs(section_job_count, jobs);
         printf("  writing %u chunks with %u job%s\n",
                section_job_count, active_jobs, active_jobs == 1 ? "" : "s");
         if (!run_chunk_jobs(chunk_jobs, section_job_count, jobs)) {
-            emit_set_chunk_table(NULL, 0);
-            free(chunk_starts);
             smc_analysis_free(&smc);
             function_list_free(&funcs);
             free(chunk_jobs);
@@ -1112,9 +1168,6 @@ int emit_code_sections_split(const LoadedCodeSection* sections,
             fclose(manifest);
             return 0;
         }
-        emit_set_chunk_table(NULL, 0);
-        free(chunk_starts);
-
         free(chunk_jobs);
         free(insts);
     }
@@ -1155,6 +1208,11 @@ int emit_code_sections_split(const LoadedCodeSection* sections,
 
     emit_dispatch_helpers(header, &funcs, entry_point);
     emit_footer(header);
+    // The emitter must not keep pointers to memory about to be freed.
+    emit_set_chunk_table(NULL, NULL, 0);
+    free(chunk_starts);
+    free(chunk_ends);
+
     smc_analysis_free(&smc);
     function_list_free(&funcs);
     fprintf(manifest, "\n// %u C files\n", file_count);

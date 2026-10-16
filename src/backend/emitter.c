@@ -4,6 +4,85 @@
 #include "emitter.h"
 #include "backend/c_cfg.h"
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+// Native substitution of guest library functions.
+//
+// A recompiled paired-single routine costs far more than the handful of host
+// instructions it stands for: every guest instruction becomes a helper call
+// against the register file in memory. Where the guest function is a pure
+// library routine whose semantics are fixed - the Dolphin SDK matrix calls, for
+// instance - the body can be replaced with a direct call to a native one.
+//
+// This is deliberately data driven rather than a built-in list of addresses:
+// the addresses are per game, and DolRecomp is not. The substitutions come from
+// DOLRECOMP_NATIVE_SUBST as "address:symbol" pairs separated by commas, e.g.
+//
+//   DOLRECOMP_NATIVE_SUBST=800A2D98:dolrecomp_native_psmtx_concat,...
+//
+// The replacement is emitted at the function's entry label only. Anything that
+// branches into the middle of the original still runs the translated code, so a
+// wrong entry in the table degrades to a missed optimisation rather than to
+// wrong execution.
+#define DOLRECOMP_MAX_NATIVE_SUBST 64
+
+typedef struct {
+    u32 address;
+    char symbol[64];
+} NativeSubst;
+
+static NativeSubst g_native_subst[DOLRECOMP_MAX_NATIVE_SUBST];
+static u32 g_native_subst_count = 0;
+static int g_native_subst_loaded = 0;
+
+static void load_native_subst(void) {
+    if (g_native_subst_loaded)
+        return;
+    g_native_subst_loaded = 1;
+
+    const char* spec = getenv("DOLRECOMP_NATIVE_SUBST");
+    if (!spec || !*spec)
+        return;
+
+    const char* cursor = spec;
+    while (*cursor && g_native_subst_count < DOLRECOMP_MAX_NATIVE_SUBST) {
+        char* end = NULL;
+        unsigned long address = strtoul(cursor, &end, 16);
+        if (end == cursor || *end != ':') {
+            fprintf(stderr,
+                    "dolrecomp: DOLRECOMP_NATIVE_SUBST wants address:symbol pairs\n");
+            g_native_subst_count = 0;
+            return;
+        }
+        const char* symbol = end + 1;
+        const char* comma = strchr(symbol, ',');
+        size_t length = comma ? (size_t)(comma - symbol) : strlen(symbol);
+        if (length == 0 || length >= sizeof(g_native_subst[0].symbol)) {
+            fprintf(stderr, "dolrecomp: bad symbol in DOLRECOMP_NATIVE_SUBST\n");
+            g_native_subst_count = 0;
+            return;
+        }
+        g_native_subst[g_native_subst_count].address = (u32)address;
+        memcpy(g_native_subst[g_native_subst_count].symbol, symbol, length);
+        g_native_subst[g_native_subst_count].symbol[length] = '\0';
+        g_native_subst_count++;
+        if (!comma)
+            break;
+        cursor = comma + 1;
+    }
+}
+
+static const char* native_subst_for(u32 address) {
+    load_native_subst();
+    for (u32 i = 0; i < g_native_subst_count; ++i) {
+        if (g_native_subst[i].address == address)
+            return g_native_subst[i].symbol;
+    }
+    return NULL;
+}
+
 static u32 cr_field_shift(u8 crf) {
     return 4u * (7u - (u32)crf);
 }
@@ -316,11 +395,14 @@ static bool branch_target_is_local(u32 func_start, u32 func_end, u32 target) {
 // read-only thereafter, so no locking. NULL means "no table": every cross-chunk
 // branch takes the safe return-to-chassis path.
 static const u32* g_chunk_starts = NULL;
+static const u32* g_chunk_ends = NULL;
 static u32 g_chunk_count = 0;
 
-void emit_set_chunk_table(const u32* starts, u32 count) {
-    g_chunk_starts = count ? starts : NULL;
-    g_chunk_count = count ? count : 0;
+void emit_set_chunk_table(const u32* starts, const u32* ends, u32 count) {
+    const bool usable = count && starts && ends;
+    g_chunk_starts = usable ? starts : NULL;
+    g_chunk_ends = usable ? ends : NULL;
+    g_chunk_count = usable ? count : 0;
 }
 
 // The chunk whose func_<start>() covers `addr`, or 0 if none does. Chunks tile
@@ -337,7 +419,18 @@ static u32 chunk_start_for(u32 addr) {
         else
             hi = mid;
     }
-    return lo ? g_chunk_starts[lo - 1u] : 0;
+    if (!lo)
+        return 0;
+    // The search finds the greatest start <= addr, which is the right chunk only
+    // if addr actually falls inside it. Chunks tile each text section, but the
+    // sections themselves need not be contiguous, so an address in a gap between
+    // them would otherwise resolve to the last chunk of the preceding section and
+    // emit a direct call into a function that does not contain the target. Bound
+    // it and decline instead: the caller falls back to the chassis, which knows
+    // how to reach anything.
+    if (addr >= g_chunk_ends[lo - 1u])
+        return 0;
+    return g_chunk_starts[lo - 1u];
 }
 
 
@@ -1094,17 +1187,23 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         break;
 
     case PPC_OP_FADDS:
-        fprintf(out, "    ppc_fadds(ctx, %u, %u, %u);\n", inst->rD, inst->rA, inst->rB);
+        fprintf(out, "    ppc_fadds%s(ctx, %u, %u, %u);\n",
+                dolrecomp_fp_suffix() ? dolrecomp_fp_suffix() : "",
+                inst->rD, inst->rA, inst->rB);
         if (inst->rc) emit_set_cr1_from_fpscr(out);
         break;
 
     case PPC_OP_FSUBS:
-        fprintf(out, "    ppc_fsubs(ctx, %u, %u, %u);\n", inst->rD, inst->rA, inst->rB);
+        fprintf(out, "    ppc_fsubs%s(ctx, %u, %u, %u);\n",
+                dolrecomp_fp_suffix() ? dolrecomp_fp_suffix() : "",
+                inst->rD, inst->rA, inst->rB);
         if (inst->rc) emit_set_cr1_from_fpscr(out);
         break;
 
     case PPC_OP_FMULS:
-        fprintf(out, "    ppc_fmuls(ctx, %u, %u, %u);\n", inst->rD, inst->rA, inst->rC);
+        fprintf(out, "    ppc_fmuls%s(ctx, %u, %u, %u);\n",
+                dolrecomp_fp_suffix() ? dolrecomp_fp_suffix() : "",
+                inst->rD, inst->rA, inst->rC);
         if (inst->rc) emit_set_cr1_from_fpscr(out);
         break;
 
@@ -1127,7 +1226,8 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         const bool neg = inst->op == PPC_OP_FNMADDS || inst->op == PPC_OP_FNMSUBS;
         fprintf(out, "    {\n");
         fprintf(out, "        f64 result;\n");
-        fprintf(out, "        if (ppc_fma(ctx, ctx->fpr[%u], ctx->fpr[%u], ctx->fpr[%u], true, %s, %s, &result))\n",
+        fprintf(out, "        if (ppc_fma%s(ctx, ctx->fpr[%u], ctx->fpr[%u], ctx->fpr[%u], true, %s, %s, &result))\n",
+                dolrecomp_fp_suffix() ? dolrecomp_fp_suffix() : "",
                 inst->rA, inst->rC, inst->rB, sub ? "true" : "false", neg ? "true" : "false");
         fprintf(out, "            ctx->fpr[%u] = ctx->ps1[%u] = result;\n", inst->rD, inst->rD);
         if (inst->rc) emit_set_cr1_from_fpscr(out);
@@ -1611,6 +1711,25 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
     case PPC_OP_DCBF:
     case PPC_OP_DCBI:
     case PPC_OP_ICBI:
+        if (dolrecomp_inline_cache_ops()) {
+            // ppc_cache_control reaches the same host hook the fallback would,
+            // including dcbi's privilege trap, so the only thing that changes is
+            // that the chunk keeps running instead of returning to the dispatcher
+            // for every 32-byte line of a DCFlushRange.
+            const char* operation =
+                inst->op == PPC_OP_DCBST ? "PPC_CACHE_DCBST" :
+                inst->op == PPC_OP_DCBF  ? "PPC_CACHE_DCBF"  :
+                inst->op == PPC_OP_DCBI  ? "PPC_CACHE_DCBI"  : "PPC_CACHE_ICBI";
+            fprintf(out, "    {\n");
+            fprintf(out, "        u32 ea = ");
+            emit_xform_ea(out, inst->rA, inst->rB, false);
+            fprintf(out, ";\n");
+            fprintf(out, "        ppc_cache_control(ctx, %s, ea, 0x%08Xu);\n",
+                    operation, inst->address);
+            fprintf(out, "        if (ctx->exception) return;\n");
+            fprintf(out, "    }\n");
+            break;
+        }
         fprintf(out, "    ppc_fallback_instruction(ctx, 0x%08Xu, 0x%08Xu);\n",
                 inst->raw, inst->address);
         fprintf(out, "    return;\n");
@@ -1931,6 +2050,18 @@ bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
 
     for (u32 i = 0; i < count; i++) {
         fprintf(out, "label_%08X:\n", insts[i].address);
+        const char* native = native_subst_for(insts[i].address);
+        if (native) {
+            // The native routine returns 1 if it performed the guest function
+            // (including setting pc to lr), or 0 to decline. On a decline we
+            // fall straight through into the translated instructions, so a
+            // substitution that cannot handle its inputs - a pointer outside
+            // main RAM, say - costs a branch rather than corrupting state. The
+            // first version of this emitted an unconditional call, which turned
+            // any unhandled case into a silent no-op.
+            fprintf(out, "    extern int %s(CPUState*);\n", native);
+            fprintf(out, "    if (%s(ctx)) return;\n", native);
+        }
         if (cfg.loop_ends[i] != UINT32_MAX) {
             u32 continuation = insts[cfg.loop_ends[i]].address + 4u;
             fprintf(out, "    loop_%08X(ctx);\n", insts[i].address);

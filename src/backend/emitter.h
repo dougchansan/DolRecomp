@@ -21,7 +21,7 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu);
 // Direct calls bypass chassis dispatch checks and must not be enabled by a
 // runtime that validates mutable guest code there. Call before worker emission;
 // passing count == 0 restores the safe return-to-chassis form.
-void emit_set_chunk_table(const u32* starts, u32 count);
+void emit_set_chunk_table(const u32* starts, const u32* ends, u32 count);
 
 // emit a single recompiled function as C code
 bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr);
