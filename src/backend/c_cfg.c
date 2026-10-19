@@ -5,12 +5,46 @@
 #include <stdlib.h>
 #include <string.h>
 
+int dolrecomp_inline_fp(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char* spec = getenv("DOLRECOMP_INLINE_FP");
+        cached = (spec && *spec) ? atoi(spec) : 0;
+        if (cached < 0 || cached > 2)
+            cached = 0;
+    }
+    return cached;
+}
+
+// Suffix selecting which inline FP variant the generated code calls, or NULL
+// when the ordinary out-of-line helpers should be used.
+const char* dolrecomp_fp_suffix(void) {
+    switch (dolrecomp_inline_fp()) {
+    case 1: return "_fast";
+    case 2: return "_fastnf";
+    default: return 0;
+    }
+}
+
+bool dolrecomp_inline_cache_ops(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char* spec = getenv("DOLRECOMP_INLINE_CACHE_OPS");
+        cached = (spec && *spec && *spec != '0') ? 1 : 0;
+    }
+    return cached != 0;
+}
+
 static bool instruction_uses_fallback(const PPCInst* inst) {
     switch (inst->op) {
     case PPC_OP_DCBST:
     case PPC_OP_DCBF:
     case PPC_OP_DCBI:
     case PPC_OP_ICBI:
+        // Emitted inline against ppc_cache_control when enabled. That reaches
+        // the same host hook in the same order; only the dispatcher round trip
+        // per cache line goes away.
+        return !dolrecomp_inline_cache_ops();
     case PPC_OP_UNKNOWN:
         return true;
     case PPC_OP_MFSPR:
@@ -102,6 +136,16 @@ static u32 instruction_cycles(const PPCInst* inst) {
         return 40;
     case PPC_OP_DCBZ:
         return 5;
+    // Only reached when these are emitted inline rather than as a fallback.
+    // The host charges 5 (dcbf/dcbst/dcbi) and 4 (icbi) from
+    // HookInstructionFallback's cache fast path, so charging the same here
+    // keeps emulated time identical whichever way they were emitted.
+    case PPC_OP_DCBST:
+    case PPC_OP_DCBF:
+    case PPC_OP_DCBI:
+        return 5;
+    case PPC_OP_ICBI:
+        return 4;
     case PPC_OP_DCBTST:
     case PPC_OP_DCBT:
         return 2;
